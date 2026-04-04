@@ -454,8 +454,8 @@ class SessionUploader:
         last_ns = ts_to_ns(all_events[-1].get("timestamp")) if all_events else start_ns
 
         tz_cn = timezone(offset=timedelta(hours=8))
-        time_code = datetime.now(tz=tz_cn).strftime("%m%d%H%M")
-        trace_display_name = f"openclaw-session-script-{time_code}"
+        time_code = datetime.now(tz=tz_cn).strftime("%Y%m%d%H%M")
+        trace_display_name = f"openclaw-report-{time_code}"
 
         # Build all turn children
         turn_children: list[dict] = []
@@ -945,7 +945,7 @@ def dump_session(jsonl_path: str) -> None:
 
     record: dict = {
         "name": f"session:{sid[:8]}",
-        "trace_name": f"openclaw-session-script-{time_code}",
+        "trace_name": f"openclaw-report-{time_code}",
         "session_id": sid,
         "user_id": "dump-mode",
         "tags": [uploader.skill, "openclaw", session["provider"]],

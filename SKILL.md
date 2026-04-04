@@ -125,7 +125,7 @@ The script classifies 106 caw CLI subcommands into categories:
 
 | Langfuse Dimension | Value | Source |
 |-------------------|-------|--------|
-| Trace Name | `openclaw-session-script-<MMDDHHmm>` | Upload timestamp (UTC+8) |
+| Trace Name | `openclaw-report-<YYYYMMDDHHmm>` | Upload timestamp (UTC+8) |
 | Session ID | OpenClaw session UUID | session.jsonl |
 | User ID | Telegram sender_id or "unknown" | First user message |
 | Tags | `[skill_name, "openclaw", provider]` | Session metadata |
