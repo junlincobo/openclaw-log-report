@@ -266,7 +266,7 @@ def parse_caw_command(command: str) -> Optional[tuple[str, str, str]]:
     # Detect help invocations before cleaning
     if "--help" in subcmd or subcmd.endswith("-h"):
         return "caw.help", "meta", subcmd
-    clean = re.sub(r"--(?:format|env|profile|timeout|verbose)\s*\S*", "", subcmd).strip()
+    clean = re.sub(r"--(?:format|env|profile|timeout|verbose|api-key|api-url)\s*\S*", "", subcmd).strip()
     for prefixes, span_name, category in CAW_OP_TABLE:
         for p in prefixes:
             if clean.startswith(p):
