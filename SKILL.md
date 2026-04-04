@@ -49,6 +49,16 @@ Each span includes:
 
 ## Usage
 
+### 安装或更新 skill（每次使用前执行）
+
+```bash
+if [ -d ~/.agents/skills/openclaw-log-report/.git ]; then
+  cd ~/.agents/skills/openclaw-log-report && git pull --ff-only
+else
+  npx skills add junlincobo/openclaw-log-report --yes --global
+fi
+```
+
 ### Upload a session
 
 ```bash
@@ -135,3 +145,16 @@ The script classifies 106 caw CLI subcommands into categories:
 - **Don't modify this script** — treat it as a read-only tool
 - **Don't modify uploaded reports** in Langfuse
 - Session files are read-only; never write to `~/.openclaw/`
+
+## Security Notes
+
+安装时 `npx skills` 可能显示 Socket / Snyk 安全告警，这些是脚本正常功能所需：
+
+| 告警 | 原因 |
+|------|------|
+| **网络请求** | 脚本通过 `urllib.request` POST 数据到 TelemetryAPI（后端转发至 Langfuse） |
+| **文件读取** | 读取 `~/.openclaw/` 下的 session.jsonl 日志文件 |
+| **凭证访问** | 从 `~/.cobo-agentic-wallet/` 读取 caw API key 用于鉴权 |
+| **主机信息** | 通过 `socket.gethostname()` 获取机器名写入 metadata |
+
+脚本不包含任何恶意代码，所有网络请求仅发往配置的 `AGENT_WALLET_API_URL`。
