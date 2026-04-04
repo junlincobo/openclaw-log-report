@@ -18,8 +18,10 @@ span 结构（与原 OTel 版等效）:
 
 import json
 import os
+import random
 import re
 import glob
+import string
 import sys
 import time
 import urllib.request
@@ -454,8 +456,12 @@ class SessionUploader:
         last_ns = ts_to_ns(all_events[-1].get("timestamp")) if all_events else start_ns
 
         tz_cn = timezone(offset=timedelta(hours=8))
-        time_code = datetime.now(tz=tz_cn).strftime("%Y%m%d%H%M")
-        trace_display_name = f"openclaw-report-{time_code}"
+        now_cn = datetime.now(tz=tz_cn)
+        time_code = now_cn.strftime("%Y%m%d%H%M")
+        rand_suffix = ''.join(random.choices(string.ascii_lowercase + string.digits, k=4))
+        trace_display_name = f"script_{time_code}_{rand_suffix}"
+        upload_date_tag = f"upload:{now_cn.strftime('%Y%m%d')}"
+        upload_iso = now_cn.isoformat()
 
         # Build all turn children
         turn_children: list[dict] = []
@@ -469,7 +475,7 @@ class SessionUploader:
             "trace_name": trace_display_name,
             "session_id": sid,
             "user_id": user_id,
-            "tags": [self.skill, "openclaw", prov],
+            "tags": [self.skill, "openclaw", prov, upload_date_tag],
             "start_time_unix_nano": start_ns,
             "end_time_unix_nano": last_ns,
             "metadata": {
@@ -479,6 +485,7 @@ class SessionUploader:
                 "cwd": session.get("cwd", ""),
                 "session_id": sid,
                 "telemetry_source": "script",
+                "uploaded_at": upload_iso,
             },
             "attributes": {
                 "langfuse.observation.input": safe_str({
@@ -936,7 +943,11 @@ def dump_session(jsonl_path: str) -> None:
 
     uploader = SessionUploader("http://dummy", "dummy")
     sid = session["session_id"]
-    time_code = datetime.now(tz=timezone.utc).strftime("%m%d%H%M")
+    now_cn = datetime.now(tz=timezone(offset=timedelta(hours=8)))
+    time_code = now_cn.strftime("%Y%m%d%H%M")
+    rand_suffix = ''.join(random.choices(string.ascii_lowercase + string.digits, k=4))
+    upload_date_tag = f"upload:{now_cn.strftime('%Y%m%d')}"
+    upload_iso = now_cn.isoformat()
 
     # Build the same record as upload() would
     turn_children = []
@@ -945,11 +956,11 @@ def dump_session(jsonl_path: str) -> None:
 
     record: dict = {
         "name": f"session:{sid[:8]}",
-        "trace_name": f"openclaw-report-{time_code}",
+        "trace_name": f"script_{time_code}_{rand_suffix}",
         "session_id": sid,
         "user_id": "dump-mode",
-        "tags": [uploader.skill, "openclaw", session["provider"]],
-        "metadata": {"model": session["model"], "turns": len(turns)},
+        "tags": [uploader.skill, "openclaw", session["provider"], upload_date_tag],
+        "metadata": {"model": session["model"], "turns": len(turns), "uploaded_at": upload_iso},
         "children": turn_children,
     }
 
