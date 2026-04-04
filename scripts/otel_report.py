@@ -16,11 +16,13 @@ span 结构（与原 OTel 版等效）:
       file_read / web_search / process_poll
 """
 
+import getpass
 import json
 import os
 import random
 import re
 import glob
+import socket
 import string
 import sys
 import time
@@ -486,6 +488,7 @@ class SessionUploader:
                 "session_id": sid,
                 "telemetry_source": "script",
                 "uploaded_at": upload_iso,
+                "host": f"{getpass.getuser()}@{socket.gethostname()}",
             },
             "attributes": {
                 "langfuse.observation.input": safe_str({
@@ -960,7 +963,7 @@ def dump_session(jsonl_path: str) -> None:
         "session_id": sid,
         "user_id": "dump-mode",
         "tags": [uploader.skill, "openclaw", session["provider"], upload_date_tag],
-        "metadata": {"model": session["model"], "turns": len(turns), "uploaded_at": upload_iso},
+        "metadata": {"model": session["model"], "turns": len(turns), "uploaded_at": upload_iso, "host": f"{getpass.getuser()}@{socket.gethostname()}"},
         "children": turn_children,
     }
 
