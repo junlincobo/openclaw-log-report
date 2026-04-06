@@ -49,16 +49,6 @@ Each span includes:
 
 ## Usage
 
-### 安装或更新 skill（每次使用前执行）
-
-```bash
-if [ -d ~/.agents/skills/openclaw-log-report/.git ]; then
-  cd ~/.agents/skills/openclaw-log-report && git pull --ff-only
-else
-  npx skills add junlincobo/openclaw-log-report --yes --global
-fi
-```
-
 ### Upload a session
 
 ```bash
@@ -71,6 +61,50 @@ The script auto-detects API URL and key from caw config. Override with env vars:
 AGENT_WALLET_API_URL=https://api-core.agenticwallet.sandbox.cobo.com \
 python scripts/otel_report.py session.jsonl
 ```
+
+### Custom trace name
+
+```bash
+python scripts/otel_report.py --trace-name "bugbash-lishu-0403" session.jsonl
+```
+
+Default trace name format: `script_{user}@{hostname}_{MMDDHHmm}`, e.g. `script_ubuntu@baiyang-openclew-dev-v1_04061109`
+
+### Upload multiple sessions
+
+```bash
+# Multiple files
+python scripts/otel_report.py a.jsonl b.jsonl c.jsonl
+
+# Glob pattern
+python scripts/otel_report.py ~/.openclaw/agents/main/sessions/*.jsonl
+```
+
+### Upload by time range
+
+Filters by **session content time** (not file modification time). Both session selection and turn-level filtering apply — only turns within the time range are uploaded.
+
+```bash
+# Last 2 hours — only uploads turns from the last 2h
+python scripts/otel_report.py --since 2h
+
+# Last 1 day
+python scripts/otel_report.py --since 1d
+
+# Specific time range (UTC+8)
+python scripts/otel_report.py --since 2026-04-05T10:00 --until 2026-04-05T18:00
+
+# A full day
+python scripts/otel_report.py --since 2026-04-05 --until 2026-04-06
+
+# Filter a specific file — only turns in range are included
+python scripts/otel_report.py --since 8h ~/Downloads/session.jsonl
+
+# Custom sessions directory + time range
+python scripts/otel_report.py --since 2h /path/to/sessions/
+```
+
+Supported time formats: `2h` (hours ago), `30m` (minutes ago), `1d` (days ago), `2026-04-05`, `2026-04-05T10:00`
 
 ### Dry run (preview without uploading)
 
@@ -135,7 +169,7 @@ The script classifies 106 caw CLI subcommands into categories:
 
 | Langfuse Dimension | Value | Source |
 |-------------------|-------|--------|
-| Trace Name | `script_<YYYYMMDDHHmm>_<4char>` | Upload timestamp (UTC+8) + random suffix |
+| Trace Name | `script_{user}@{hostname}_{MMDDHHmm}` | User + hostname + timestamp (UTC+8), or custom via `--trace-name` |
 | Session ID | OpenClaw session UUID | session.jsonl |
 | User ID | Telegram sender_id or "unknown" | First user message |
 | Tags | `[skill_name, "openclaw", provider, "upload:YYYYMMDD"]` | Session metadata + upload date |

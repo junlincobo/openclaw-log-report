@@ -360,6 +360,11 @@ def extract_user_text(msg: dict) -> str:
             "", text, flags=re.DOTALL
         ).strip()
         text = re.sub(r"^System:.*", "", text, flags=re.MULTILINE).strip()
+        # Remove Sender metadata block for turn name preview
+        text = re.sub(
+            r"Sender \(untrusted metadata\):\s*```json\s*\{.*?\}\s*```",
+            "", text, flags=re.DOTALL
+        ).strip()
         if text:
             parts.append(text[:400])
     return " | ".join(parts)
@@ -428,20 +433,39 @@ class SessionUploader:
 
     def __init__(self, api_url: str, api_key: str,
                  skill_name: str = "cobo-agentic-wallet-sandbox",
-                 resource: Optional[dict[str, str]] = None):
+                 resource: Optional[dict[str, str]] = None,
+                 trace_name: str = ""):
         self.api_url = api_url.rstrip("/")
         self.api_key = api_key
         self.skill = skill_name
         self.resource = resource or {}
+        self.trace_name = trace_name
     def _post_session(self, record: dict) -> bool:
         return post_session(self.api_url, self.api_key, record)
 
     # ── 会话级 ────────────────────────────────────────────────────────────────
 
-    def upload(self, session: dict, user_id: str = "") -> None:
+    def upload(self, session: dict, user_id: str = "",
+               since_ts: Optional[float] = None, until_ts: Optional[float] = None) -> None:
         evts = extract_message_events(session)
         turns = build_turns(evts)
         tr_idx = build_tool_result_index(evts)
+
+        # Filter turns by time range if specified
+        if since_ts or until_ts:
+            since_ns = int(since_ts * 1e9) if since_ts else 0
+            until_ns = int(until_ts * 1e9) if until_ts else float("inf")
+            filtered_turns = []
+            for turn in turns:
+                turn_start = ts_to_ns(turn[0].get("timestamp")) or 0
+                turn_end = ts_to_ns(turn[-1].get("timestamp")) or turn_start
+                # Keep turn if it overlaps with [since_ns, until_ns]
+                if turn_start <= until_ns and turn_end >= since_ns:
+                    filtered_turns.append(turn)
+            skipped = len(turns) - len(filtered_turns)
+            if skipped:
+                print(f"[INFO] Filtered: {len(filtered_turns)} turns in range, {skipped} skipped")
+            turns = filtered_turns
 
         sid = session["session_id"]
         model = session["model"]
@@ -459,10 +483,11 @@ class SessionUploader:
 
         tz_cn = timezone(offset=timedelta(hours=8))
         now_cn = datetime.now(tz=tz_cn)
-        time_code = now_cn.strftime("%Y%m%d%H%M")
-        rand_suffix = ''.join(random.choices(string.ascii_lowercase + string.digits, k=4))
-        trace_display_name = f"script_{time_code}_{rand_suffix}"
-        upload_date_tag = f"upload:{now_cn.strftime('%Y%m%d')}"
+        time_code = now_cn.strftime("%m%d%H%M")
+        import socket
+        user = os.environ.get("USER") or os.environ.get("USERNAME") or "unknown"
+        hostname = socket.gethostname()
+        trace_display_name = self.trace_name or f"script_{user}@{hostname}_{time_code}"
         upload_iso = now_cn.isoformat()
 
         # Build all turn children
@@ -477,7 +502,7 @@ class SessionUploader:
             "trace_name": trace_display_name,
             "session_id": sid,
             "user_id": user_id,
-            "tags": [self.skill, "openclaw", prov, upload_date_tag],
+            "tags": ["openclaw"],
             "start_time_unix_nano": start_ns,
             "end_time_unix_nano": last_ns,
             "metadata": {
@@ -519,7 +544,8 @@ class SessionUploader:
     def _build_turn_record(self, turn, idx, model, provider, tr_idx) -> dict:
         user_ev = turn[0]
         user_msg = user_ev.get("message", {})
-        user_text = extract_user_text(user_msg)
+        user_text_raw = extract_user_text(user_msg)
+        user_text_clean = user_text_raw
         sender = extract_sender_name(user_msg)
         turn_start_ns = ts_to_ns(user_ev.get("timestamp"))
         turn_end_ns = ts_to_ns(turn[-1].get("timestamp")) if turn else turn_start_ns
@@ -542,13 +568,17 @@ class SessionUploader:
                     if b.get("type") == "text":
                         final_text = b.get("text", "")[:500]
 
+        # Turn name with cleaned user input preview (max 10 chars)
+        input_preview = user_text_clean[:10].rstrip() + ".." if len(user_text_clean) > 10 else user_text_clean
+        turn_name = f'turn:{idx} ("{input_preview}")' if input_preview else f"turn:{idx}"
+
         return {
-            "name": f"turn:{idx}",
+            "name": turn_name,
             "record_type": "span",
             "start_time_unix_nano": turn_start_ns,
             "end_time_unix_nano": turn_end_ns,
             "attributes": {
-                "langfuse.observation.input": safe_str({"role": "user", "content": user_text}),
+                "langfuse.observation.input": safe_str({"role": "user", "content": user_text_raw}),
                 "langfuse.observation.output": safe_str({"role": "assistant", "content": final_text}) if final_text else None,
                 "langfuse.trace.metadata.turn_index": str(idx),
                 "langfuse.trace.metadata.sender": sender,
@@ -749,14 +779,17 @@ def upload_session_file(
     api_key: str = "",
     user_id: str = "",
     skill_name: str = "cobo-agentic-wallet-sandbox",
+    trace_name: str = "",
+    since_ts: Optional[float] = None,
+    until_ts: Optional[float] = None,
 ) -> None:
     """上报 session 到 TelemetryAPI。自动从 caw 配置读取 API key。"""
     caw_cfg = load_caw_config()
 
-    api_url = api_url or caw_cfg.get("api_url", "")
-    api_key = api_key or caw_cfg.get("api_key", "")
-    if not api_url or not api_key:
-        print("[ERROR] 缺少 api_url 或 api_key。请确认 caw 已安装并 onboard，或设置环境变量。")
+    api_url = api_url or caw_cfg.get("api_url", "") or "https://api-core.agenticwallet.sandbox.cobo.com"
+    api_key = api_key or caw_cfg.get("api_key", "") or ""
+    if not api_url:
+        print("[ERROR] 缺少 api_url。请设置 AGENT_WALLET_API_URL 环境变量。")
         sys.exit(1)
 
     resource = {
@@ -770,8 +803,8 @@ def upload_session_file(
     print(f"[INFO] Parsing {session['session_id']}  model={session['model']}  "
           f"events={len(extract_message_events(session))}")
 
-    uploader = SessionUploader(api_url, api_key, skill_name, resource)
-    uploader.upload(session, user_id=user_id)
+    uploader = SessionUploader(api_url, api_key, skill_name, resource, trace_name=trace_name)
+    uploader.upload(session, user_id=user_id, since_ts=since_ts, until_ts=until_ts)
 
 
 def watch_and_upload(
@@ -817,11 +850,23 @@ def watch_and_upload(
 
 # ── Dry Run（不上报，打印 span 树）───────────────────────────────────────────
 
-def dry_run_session(jsonl_path: str) -> None:
+def dry_run_session(jsonl_path: str, since_ts: Optional[float] = None,
+                    until_ts: Optional[float] = None) -> None:
     session = parse_session(jsonl_path)
     evts = extract_message_events(session)
     turns = build_turns(evts)
     tr_idx = build_tool_result_index(evts)
+
+    # Filter turns by time range
+    if since_ts or until_ts:
+        since_ns = int(since_ts * 1e9) if since_ts else 0
+        until_ns = int(until_ts * 1e9) if until_ts else float("inf")
+        original = len(turns)
+        turns = [t for t in turns
+                 if (ts_to_ns(t[0].get("timestamp")) or 0) <= until_ns
+                 and (ts_to_ns(t[-1].get("timestamp")) or 0) >= since_ns]
+        if original != len(turns):
+            print(f"[INFO] Filtered: {len(turns)} turns in range, {original - len(turns)} skipped")
 
     print(f"{'='*60}")
     print(f"Session: {session['session_id']}")
@@ -949,7 +994,6 @@ def dump_session(jsonl_path: str) -> None:
     now_cn = datetime.now(tz=timezone(offset=timedelta(hours=8)))
     time_code = now_cn.strftime("%Y%m%d%H%M")
     rand_suffix = ''.join(random.choices(string.ascii_lowercase + string.digits, k=4))
-    upload_date_tag = f"upload:{now_cn.strftime('%Y%m%d')}"
     upload_iso = now_cn.isoformat()
 
     # Build the same record as upload() would
@@ -962,7 +1006,7 @@ def dump_session(jsonl_path: str) -> None:
         "trace_name": f"script_{time_code}_{rand_suffix}",
         "session_id": sid,
         "user_id": "dump-mode",
-        "tags": [uploader.skill, "openclaw", session["provider"], upload_date_tag],
+        "tags": ["openclaw"],
         "metadata": {"model": session["model"], "turns": len(turns), "uploaded_at": upload_iso, "host": f"{getpass.getuser()}@{socket.gethostname()}"},
         "children": turn_children,
     }
@@ -979,6 +1023,100 @@ def dump_session(jsonl_path: str) -> None:
     print(f"POST body size: {len(json.dumps(record, default=str)):,} bytes")
 
 
+def _parse_time_arg(value: str) -> float:
+    """Parse a time argument into a Unix timestamp.
+
+    Supports:
+      - Relative: "2h", "30m", "1d" (hours/minutes/days ago)
+      - Date: "2026-04-05" (start of day, UTC+8)
+      - Datetime: "2026-04-05T10:00", "2026-04-05T10:00:00"
+    """
+    # Relative: 2h, 30m, 1d
+    m = re.match(r"^(\d+)([hmd])$", value)
+    if m:
+        amount, unit = int(m.group(1)), m.group(2)
+        seconds = {"h": 3600, "m": 60, "d": 86400}[unit]
+        return time.time() - amount * seconds
+
+    # Absolute datetime/date (treat as UTC+8)
+    tz_cn = timezone(offset=timedelta(hours=8))
+    for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M", "%Y-%m-%d"):
+        try:
+            dt = datetime.strptime(value, fmt).replace(tzinfo=tz_cn)
+            return dt.timestamp()
+        except ValueError:
+            continue
+
+    print(f"[ERROR] 无法解析时间参数: {value}")
+    print("  支持格式: 2h, 30m, 1d, 2026-04-05, 2026-04-05T10:00")
+    sys.exit(1)
+
+
+def _extract_named_arg(cli_args: list[str], name: str) -> str:
+    """Extract a named argument (--name value) from cli_args, mutating the list."""
+    for i, arg in enumerate(cli_args):
+        if arg == name and i + 1 < len(cli_args):
+            value = cli_args[i + 1]
+            cli_args.pop(i + 1)
+            cli_args.pop(i)
+            return value
+    return ""
+
+
+def _get_session_time_range(path: str) -> tuple[Optional[float], Optional[float]]:
+    """Read session start and end timestamps from jsonl file.
+
+    Returns (start_ts, end_ts) as Unix timestamps.
+    start = session event timestamp, end = last event timestamp.
+    """
+    start_ts: Optional[float] = None
+    end_ts: Optional[float] = None
+    try:
+        with open(path) as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                ev = json.loads(line)
+                ts_str = ev.get("timestamp")
+                if not ts_str:
+                    continue
+                try:
+                    ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00")).timestamp()
+                except (ValueError, AttributeError):
+                    continue
+                if ev.get("type") == "session" and start_ts is None:
+                    start_ts = ts
+                end_ts = ts  # last event timestamp
+    except Exception:
+        pass
+    return start_ts, end_ts
+
+
+def _session_overlaps(path: str, since_ts: float, until_ts: float) -> bool:
+    """Check if a session's time range overlaps with [since_ts, until_ts]."""
+    start_ts, end_ts = _get_session_time_range(path)
+    if start_ts is None:
+        return False
+    end_ts = end_ts or start_ts
+    # Overlap: session starts before until AND ends after since
+    return start_ts <= until_ts and end_ts >= since_ts
+
+
+def _collect_paths_by_time(since_ts: float, until_ts: float, sessions_dir: str) -> list[str]:
+    """Collect .jsonl files whose session time range overlaps [since_ts, until_ts]."""
+    if not os.path.isdir(sessions_dir):
+        print(f"[ERROR] 目录不存在: {sessions_dir}")
+        return []
+    paths = []
+    for f in glob.glob(os.path.join(sessions_dir, "*.jsonl")):
+        if f.endswith(".lock"):
+            continue
+        if _session_overlaps(f, since_ts, until_ts):
+            paths.append(f)
+    return sorted(paths, key=lambda f: _get_session_time_range(f)[0] or 0)
+
+
 if __name__ == "__main__":
     cli_args = sys.argv[1:]
     dry = "--dry-run" in cli_args
@@ -990,28 +1128,99 @@ if __name__ == "__main__":
     watch = "--watch" in cli_args
     if watch:
         cli_args.remove("--watch")
+    trace_name = _extract_named_arg(cli_args, "--trace-name")
+    since_str = _extract_named_arg(cli_args, "--since")
+    until_str = _extract_named_arg(cli_args, "--until")
 
     if watch:
         watch_dir = cli_args[0] if cli_args else DEFAULT_SESSIONS_DIR
         watch_and_upload(agents_dir=watch_dir)
     else:
-        path = cli_args[0] if cli_args else max(
-            (f for f in glob.glob(os.path.join(DEFAULT_SESSIONS_DIR, "*.jsonl"))
-             if not f.endswith(".lock")),
-            key=os.path.getmtime, default=None
-        )
-        if not path:
-            print("找不到 session 文件")
-            sys.exit(1)
+        paths: list[str] = []
 
-        if dump:
-            dump_session(path)
-        elif dry:
-            dry_run_session(path)
+        # Time-range filter: --since / --until
+        if since_str:
+            since_ts = _parse_time_arg(since_str)
+            until_ts = _parse_time_arg(until_str) if until_str else time.time()
+
+            # Collect files: args can be files, directories, or globs
+            # Sessions are matched if their time range overlaps [since, until].
+            scan_dirs: list[str] = []
+            for arg in cli_args:
+                if os.path.isfile(arg) and arg.endswith(".jsonl"):
+                    if _session_overlaps(arg, since_ts, until_ts):
+                        paths.append(arg)
+                elif os.path.isdir(arg):
+                    scan_dirs.append(arg)
+                else:
+                    expanded = glob.glob(arg)
+                    for f in expanded:
+                        if os.path.isdir(f):
+                            scan_dirs.append(f)
+                        elif f.endswith(".jsonl") and not f.endswith(".lock"):
+                            if _session_overlaps(f, since_ts, until_ts):
+                                paths.append(f)
+
+            # No explicit paths/dirs → use default directory
+            if not paths and not scan_dirs and not cli_args:
+                scan_dirs = [DEFAULT_SESSIONS_DIR]
+
+            # Scan directories
+            for d in scan_dirs:
+                paths.extend(_collect_paths_by_time(since_ts, until_ts, d))
+
+            tz_cn = timezone(offset=timedelta(hours=8))
+            since_dt = datetime.fromtimestamp(since_ts, tz=tz_cn).strftime("%Y-%m-%d %H:%M")
+            until_dt = datetime.fromtimestamp(until_ts, tz=tz_cn).strftime("%Y-%m-%d %H:%M")
+            sources = ", ".join(scan_dirs) if scan_dirs else "files"
+            print(f"[INFO] Time range: {since_dt} ~ {until_dt}  source={sources}")
+            print(f"[INFO] Found {len(paths)} session(s)")
         else:
-            upload_session_file(
-                path,
-                api_url=os.environ.get("AGENT_WALLET_API_URL", "https://api-core.agenticwallet.sandbox.cobo.com"),
-                api_key=os.environ.get("CAW_API_KEY", ""),
-                user_id=os.environ.get("USER_ID", ""),
-            )
+            # Expand globs and collect all paths
+            for arg in cli_args:
+                expanded = glob.glob(arg)
+                if expanded:
+                    paths.extend(f for f in expanded if f.endswith(".jsonl") and not f.endswith(".lock"))
+                elif arg.endswith(".jsonl"):
+                    paths.append(arg)
+
+            # No args → upload latest session
+            if not paths:
+                latest = max(
+                    (f for f in glob.glob(os.path.join(DEFAULT_SESSIONS_DIR, "*.jsonl"))
+                     if not f.endswith(".lock")),
+                    key=os.path.getmtime, default=None
+                )
+                if latest:
+                    paths = [latest]
+
+        if not paths:
+            if since_str:
+                print("[INFO] No sessions matched the time range.")
+            else:
+                print("[ERROR] 找不到 session 文件")
+            sys.exit(0 if since_str else 1)
+
+        api_url = os.environ.get("AGENT_WALLET_API_URL", "https://api-core.agenticwallet.sandbox.cobo.com")
+        api_key = os.environ.get("CAW_API_KEY", "")
+        user_id = os.environ.get("USER_ID", "")
+
+        for idx, path in enumerate(sorted(paths)):
+            if len(paths) > 1:
+                print(f"\n[{idx + 1}/{len(paths)}] {os.path.basename(path)}")
+            if dump:
+                dump_session(path)
+            elif dry:
+                dry_run_session(path,
+                                since_ts=since_ts if since_str else None,
+                                until_ts=until_ts if since_str else None)
+            else:
+                upload_session_file(
+                    path,
+                    api_url=api_url,
+                    api_key=api_key,
+                    user_id=user_id,
+                    trace_name=trace_name,
+                    since_ts=since_ts if since_str else None,
+                    until_ts=until_ts if since_str else None,
+                )
