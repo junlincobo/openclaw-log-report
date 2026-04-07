@@ -61,7 +61,6 @@ CAW_OP_TABLE = [
     (["wallet pair"],                 "caw.wallet.pair",       "wallet"),
     (["wallet rename"],               "caw.wallet.rename",     "wallet"),
     (["wallet archive"],              "caw.wallet.archive",    "wallet"),
-    (["wallet update"],               "caw.wallet.update",     "wallet"),
     # Address
     (["address create"],              "caw.address.create",    "wallet"),
     (["address list"],                "caw.address.list",      "query"),
@@ -207,30 +206,67 @@ def parse_session(path: str) -> dict:
             if not line:
                 continue
             ev = json.loads(line)
-            eid = ev.get("id") or ev.get("type", "")
+            eid = ev.get("id") or ev.get("uuid") or ev.get("type", "")
             if eid:
                 messages[eid] = ev
                 order.append(eid)
 
     session_ev = next((messages[i] for i in order if messages[i].get("type") == "session"), {})
+    # OpenClaw: model-snapshot event
     snapshot = next(
         (messages[i]["data"] for i in order if messages[i].get("customType") == "model-snapshot"),
         {}
     )
+
+    # Fallback for Claude Code format (no "type: session" event)
+    if not session_ev:
+        first_msg = next(
+            (messages[i] for i in order if messages[i].get("type") in ("user", "assistant")),
+            {}
+        )
+        session_id = first_msg.get("sessionId", os.path.basename(path).replace(".jsonl", ""))
+        started_at = first_msg.get("timestamp")
+        cwd = first_msg.get("cwd", "")
+        # Claude Code: model is in the first assistant message
+        first_assistant = next(
+            (messages[i] for i in order
+             if messages[i].get("type") == "assistant"
+             and messages[i].get("message", {}).get("model")),
+            {}
+        )
+        model_name = first_assistant.get("message", {}).get("model", "unknown")
+    else:
+        session_id = session_ev.get("id", os.path.basename(path).replace(".jsonl", ""))
+        started_at = session_ev.get("timestamp")
+        cwd = session_ev.get("cwd", "")
+        model_name = snapshot.get("modelId", "unknown")
+
     return {
-        "session_id": session_ev.get("id", os.path.basename(path).replace(".jsonl", "")),
-        "started_at": session_ev.get("timestamp"),
-        "cwd": session_ev.get("cwd", ""),
-        "model": snapshot.get("modelId", "unknown"),
+        "session_id": session_id,
+        "started_at": started_at,
+        "cwd": cwd,
+        "model": model_name,
         "provider": snapshot.get("provider", "unknown"),
         "messages": messages,
         "order": order,
     }
 
 
+def _is_message_event(ev: dict) -> bool:
+    """Check if event is a user/assistant message (OpenClaw or Claude Code format)."""
+    ev_type = ev.get("type", "")
+    # OpenClaw: type="message"
+    if ev_type == "message":
+        return True
+    # Claude Code: type="user" or type="assistant" with message.role
+    if ev_type in ("user", "assistant") and "message" in ev:
+        return True
+    return False
+
+
 def extract_message_events(session: dict) -> list[dict]:
     return [session["messages"][i] for i in session["order"]
-            if session["messages"][i].get("type") == "message"]
+            if _is_message_event(session["messages"][i])]
 
 
 def build_turns(message_events: list[dict]) -> list[list[dict]]:
@@ -238,6 +274,16 @@ def build_turns(message_events: list[dict]) -> list[list[dict]]:
     turns, current = [], []
     for ev in message_events:
         role = ev.get("message", {}).get("role")
+        # Skip tool_result-only user messages (Claude Code embeds tool_result in user type)
+        if role == "user":
+            content = ev.get("message", {}).get("content", [])
+            if isinstance(content, list):
+                dict_blocks = [b for b in content if isinstance(b, dict)]
+                if dict_blocks and all(b.get("type") == "tool_result" for b in dict_blocks):
+                    # This is a toolResult message, don't start a new turn
+                    if current:
+                        current.append(ev)
+                    continue
         if role == "user" and current:
             turns.append(current)
             current = []
@@ -248,12 +294,35 @@ def build_turns(message_events: list[dict]) -> list[list[dict]]:
 
 
 def build_tool_result_index(message_events: list[dict]) -> dict:
-    return {
-        ev["message"]["toolCallId"]: ev
-        for ev in message_events
-        if ev.get("message", {}).get("role") == "toolResult"
-        and ev["message"].get("toolCallId")
-    }
+    """Build index of tool results by tool call ID.
+
+    Supports both OpenClaw (role=toolResult, toolCallId) and
+    Claude Code (role=user, content[].type=tool_result, tool_use_id).
+    """
+    index: dict[str, dict] = {}
+    for ev in message_events:
+        msg = ev.get("message", {})
+        # OpenClaw format
+        if msg.get("role") == "toolResult" and msg.get("toolCallId"):
+            index[msg["toolCallId"]] = ev
+        # Claude Code format: user message with tool_result content blocks
+        elif msg.get("role") == "user":
+            content = msg.get("content", [])
+            if isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "tool_result":
+                        tool_use_id = block.get("tool_use_id", "")
+                        if tool_use_id:
+                            # Wrap as a compatible format
+                            index[tool_use_id] = {
+                                "message": {
+                                    "role": "toolResult",
+                                    "content": block.get("content", []),
+                                    "details": {},
+                                },
+                                "timestamp": ev.get("timestamp"),
+                            }
+    return index
 
 
 # ── caw 命令解析 ──────────────────────────────────────────────────────────────
@@ -351,8 +420,15 @@ def safe_str(obj, limit: int = 2000) -> str:
 
 def extract_user_text(msg: dict) -> str:
     parts = []
-    for block in msg.get("content", []):
-        if block.get("type") != "text":
+    content = msg.get("content", [])
+    # Handle string content (Claude Code sometimes uses plain string)
+    if isinstance(content, str):
+        return content[:400]
+    for block in content:
+        if isinstance(block, str):
+            parts.append(block[:400])
+            continue
+        if not isinstance(block, dict) or block.get("type") != "text":
             continue
         text = block.get("text", "")
         text = re.sub(
@@ -376,6 +452,8 @@ def extract_sender_id(msg: dict) -> str:
     Priority: sender_id (Telegram) > id (TUI/gateway) > label > empty.
     """
     for block in msg.get("content", []):
+        if not isinstance(block, dict):
+            continue
         text = block.get("text", "")
         # Telegram: "sender_id": "7367314769"
         m = re.search(r'"sender_id":\s*"([^"]+)"', text)
@@ -394,6 +472,8 @@ def extract_sender_id(msg: dict) -> str:
 
 def extract_sender_name(msg: dict) -> str:
     for block in msg.get("content", []):
+        if not isinstance(block, dict):
+            continue
         m = re.search(r'"sender":\s*"([^"]+)"', block.get("text", ""))
         if m:
             return m.group(1)
@@ -487,7 +567,10 @@ class SessionUploader:
         import socket
         user = os.environ.get("USER") or os.environ.get("USERNAME") or "unknown"
         hostname = socket.gethostname()
-        trace_display_name = self.trace_name or f"script_{user}@{hostname}_{time_code}"
+        # Simplify hostname: "lujunlin-openclew-dev-v1-20260330" → "lujunlin-openclew"
+        parts = hostname.split("-")
+        hostname_short = "-".join(parts[:2]) if len(parts) > 2 else hostname
+        trace_display_name = self.trace_name or f"script_{user}@{hostname_short}_{time_code}"
         upload_iso = now_cn.isoformat()
 
         # Build all turn children
@@ -595,7 +678,7 @@ class SessionUploader:
         usage = msg.get("usage", {})
         ts_ns = ts_to_ns(ev.get("timestamp"))
 
-        tool_calls = [b for b in content if b.get("type") == "toolCall"]
+        tool_calls = [b for b in content if b.get("type") in ("toolCall", "tool_use")]
 
         # LLM timing: message.timestamp (epoch ms) = request start, ev.timestamp = response received
         msg_ts = msg.get("timestamp")
@@ -642,7 +725,8 @@ class SessionUploader:
     def _build_tool_child(self, tc: dict, tr_idx: dict, fallback_ts_ns) -> Optional[dict]:
         call_id = tc.get("id", "")
         name = tc.get("name", "")
-        args = tc.get("arguments", {})
+        # OpenClaw: "arguments", Claude Code: "input"
+        args = tc.get("arguments") or tc.get("input") or {}
 
         result_ev = tr_idx.get(call_id)
         result_msg = result_ev.get("message", {}) if result_ev else {}
@@ -656,13 +740,21 @@ class SessionUploader:
         status_ok = exit_code is None or exit_code == 0
 
         result_text = ""
-        for b in result_msg.get("content", []):
-            if b.get("type") == "text":
-                result_text = b.get("text", "")
-                break
+        result_content = result_msg.get("content", [])
+        if isinstance(result_content, list):
+            for b in result_content:
+                if isinstance(b, dict) and b.get("type") == "text":
+                    result_text = b.get("text", "")
+                    break
+                elif isinstance(b, str):
+                    result_text = b
+                    break
+        elif isinstance(result_content, str):
+            result_text = result_content
 
-        # caw 调用
-        if name == "exec":
+        # caw 调用 — handle both OpenClaw (exec) and Claude Code (Bash) tool names
+        name_lower = name.lower()
+        if name_lower in ("exec", "bash"):
             cmd = args.get("command", "")
             caw_info = parse_caw_command(cmd)
             if caw_info:
@@ -677,11 +769,13 @@ class SessionUploader:
                 category = "env_bootstrap"
             else:
                 category = "exec"
-        elif name == "read":
+        elif name_lower in ("read", "grep", "glob"):
             category = "file_read"
-        elif name == "web_search":
+        elif name_lower in ("web_search", "webfetch", "websearch"):
             category = "web_search"
-        elif name == "process":
+        elif name_lower in ("edit", "write", "notebookedit"):
+            category = "file_write"
+        elif name_lower == "process":
             category = "process_poll"
         else:
             category = name
@@ -868,7 +962,17 @@ def dry_run_session(jsonl_path: str, since_ts: Optional[float] = None,
         if original != len(turns):
             print(f"[INFO] Filtered: {len(turns)} turns in range, {original - len(turns)} skipped")
 
+    import socket
+    tz_cn = timezone(offset=timedelta(hours=8))
+    time_code = datetime.now(tz=tz_cn).strftime("%m%d%H%M")
+    user = os.environ.get("USER") or os.environ.get("USERNAME") or "unknown"
+    hostname = socket.gethostname()
+    parts = hostname.split("-")
+    hostname_short = "-".join(parts[:2]) if len(parts) > 2 else hostname
+    trace_name = f"script_{user}@{hostname_short}_{time_code}"
+
     print(f"{'='*60}")
+    print(f"Trace:   {trace_name}")
     print(f"Session: {session['session_id']}")
     print(f"Model:   {session['model']}")
     print(f"Started: {session['started_at']}")
@@ -891,8 +995,8 @@ def dry_run_session(jsonl_path: str, since_ts: Optional[float] = None,
 
             if role == "assistant":
                 content = msg.get("content", [])
-                tool_calls = [b for b in content if b.get("type") == "toolCall"]
-                texts = [b.get("text", "")[:60] for b in content if b.get("type") == "text" and b.get("text")]
+                tool_calls = [b for b in content if b.get("type") in ("toolCall", "tool_use")]
+                texts = [b.get("text", "")[:60] for b in content if isinstance(b, dict) and b.get("type") == "text" and b.get("text")]
                 usage = msg.get("usage", {})
                 tokens = usage.get("input", 0) + usage.get("output", 0)
 
@@ -954,7 +1058,10 @@ def dry_run_session(jsonl_path: str, since_ts: Optional[float] = None,
 
                     result_text = ""
                     for b in result_msg.get("content", []):
-                        if b.get("type") == "text":
+                        if isinstance(b, str):
+                            result_text = b[:60]
+                            break
+                        if isinstance(b, dict) and b.get("type") == "text":
                             result_text = b.get("text", "")[:60]
                             break
 
