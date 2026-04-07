@@ -1,7 +1,7 @@
 ---
 name: openclaw-log-report
 metadata:
-  version: "0.1.4"
+  version: "0.1.5"
 description: |
   Parse OpenClaw session JSONL logs and upload structured telemetry to Langfuse
   via the Cobo Agentic Wallet TelemetryAPI. Zero external dependencies — only
@@ -61,14 +61,6 @@ The script auto-detects API URL and key from caw config. Override with env vars:
 AGENT_WALLET_API_URL=https://api-core.agenticwallet.sandbox.cobo.com \
 python scripts/otel_report.py session.jsonl
 ```
-
-### Custom trace name
-
-```bash
-python scripts/otel_report.py --trace-name "bugbash-lishu-0403" session.jsonl
-```
-
-Default trace name format: `script_{user}@{hostname}_{MMDDHHmm}`, e.g. `script_ubuntu@baiyang-openclew-dev-v1_04061109`
 
 ### Upload multiple sessions
 
@@ -145,6 +137,19 @@ Without arguments, uploads the most recent session file from the default path.
 | `AGENT_WALLET_API_URL` | `https://api-core.agenticwallet.sandbox.cobo.com` | Backend API URL |
 | `USER_ID` | auto-detected from session messages | User identifier in Langfuse |
 
+**Environments:**
+
+| Environment | URL |
+|------------|-----|
+| Sandbox | `https://api-core.agenticwallet.sandbox.cobo.com` (default) |
+| Dev | `https://api-core.agenticwallet.dev.cobo.com` |
+
+```bash
+# Upload to dev environment
+AGENT_WALLET_API_URL=https://api-core.agenticwallet.dev.cobo.com \
+python scripts/otel_report.py session.jsonl
+```
+
 ## caw Command Categories
 
 The script classifies 106 caw CLI subcommands into categories:
@@ -169,7 +174,7 @@ The script classifies 106 caw CLI subcommands into categories:
 
 | Langfuse Dimension | Value | Source |
 |-------------------|-------|--------|
-| Trace Name | `script_{user}@{hostname}_{MMDDHHmm}` | User + hostname + timestamp (UTC+8), or custom via `--trace-name` |
+| Trace Name | `script_{user}@{hostname}_{MMDDHHmm}` | User + hostname + timestamp (UTC+8) |
 | Session ID | OpenClaw session UUID | session.jsonl |
 | User ID | Telegram sender_id or "unknown" | First user message |
 | Tags | `[skill_name, "openclaw", provider, "upload:YYYYMMDD"]` | Session metadata + upload date |
@@ -178,6 +183,9 @@ The script classifies 106 caw CLI subcommands into categories:
 
 - **Don't modify this script** — treat it as a read-only tool
 - **Don't modify uploaded reports** in Langfuse
+- **Don't retry after success** — if upload prints `Status: OK`, do not re-run the command
+- **Uploading the current session** is allowed, but note it's still being written — the upload captures a snapshot at that moment
+- **Use `python3`** not `python` — some servers only have `python3`
 - Session files are read-only; never write to `~/.openclaw/`
 
 ## Security Notes

@@ -513,13 +513,11 @@ class SessionUploader:
 
     def __init__(self, api_url: str, api_key: str,
                  skill_name: str = "cobo-agentic-wallet-sandbox",
-                 resource: Optional[dict[str, str]] = None,
-                 trace_name: str = ""):
+                 resource: Optional[dict[str, str]] = None):
         self.api_url = api_url.rstrip("/")
         self.api_key = api_key
         self.skill = skill_name
         self.resource = resource or {}
-        self.trace_name = trace_name
     def _post_session(self, record: dict) -> bool:
         return post_session(self.api_url, self.api_key, record)
 
@@ -570,7 +568,7 @@ class SessionUploader:
         # Simplify hostname: "lujunlin-openclew-dev-v1-20260330" → "lujunlin-openclew"
         parts = hostname.split("-")
         hostname_short = "-".join(parts[:2]) if len(parts) > 2 else hostname
-        trace_display_name = self.trace_name or f"script_{user}@{hostname_short}_{time_code}"
+        trace_display_name = f"script_{user}@{hostname_short}_{time_code}"
         upload_iso = now_cn.isoformat()
 
         # Build all turn children
@@ -781,8 +779,8 @@ class SessionUploader:
             category = name
 
         attrs: dict = {
-            "langfuse.observation.input": safe_str(args, 800),
-            "langfuse.observation.output": result_text[:800],
+            "langfuse.observation.input": safe_str(args, 1000),
+            "langfuse.observation.output": result_text[:1000],
             "langfuse.observation.metadata.tool_call_id": call_id,
             "langfuse.observation.metadata.tool_name": name,
             "langfuse.observation.metadata.category": category,
@@ -873,7 +871,6 @@ def upload_session_file(
     api_key: str = "",
     user_id: str = "",
     skill_name: str = "cobo-agentic-wallet-sandbox",
-    trace_name: str = "",
     since_ts: Optional[float] = None,
     until_ts: Optional[float] = None,
 ) -> None:
@@ -897,7 +894,7 @@ def upload_session_file(
     print(f"[INFO] Parsing {session['session_id']}  model={session['model']}  "
           f"events={len(extract_message_events(session))}")
 
-    uploader = SessionUploader(api_url, api_key, skill_name, resource, trace_name=trace_name)
+    uploader = SessionUploader(api_url, api_key, skill_name, resource)
     uploader.upload(session, user_id=user_id, since_ts=since_ts, until_ts=until_ts)
 
 
@@ -1210,6 +1207,12 @@ def _session_overlaps(path: str, since_ts: float, until_ts: float) -> bool:
     return start_ts <= until_ts and end_ts >= since_ts
 
 
+def _is_active_session(path: str) -> bool:
+    """Check if a session file is still being written (has a .lock file)."""
+    lock_path = path + ".lock"
+    return os.path.exists(lock_path)
+
+
 def _collect_paths_by_time(since_ts: float, until_ts: float, sessions_dir: str) -> list[str]:
     """Collect .jsonl files whose session time range overlaps [since_ts, until_ts]."""
     if not os.path.isdir(sessions_dir):
@@ -1235,7 +1238,6 @@ if __name__ == "__main__":
     watch = "--watch" in cli_args
     if watch:
         cli_args.remove("--watch")
-    trace_name = _extract_named_arg(cli_args, "--trace-name")
     since_str = _extract_named_arg(cli_args, "--since")
     until_str = _extract_named_arg(cli_args, "--until")
 
@@ -1287,7 +1289,8 @@ if __name__ == "__main__":
             for arg in cli_args:
                 expanded = glob.glob(arg)
                 if expanded:
-                    paths.extend(f for f in expanded if f.endswith(".jsonl") and not f.endswith(".lock"))
+                    paths.extend(f for f in expanded
+                                 if f.endswith(".jsonl") and not f.endswith(".lock"))
                 elif arg.endswith(".jsonl"):
                     paths.append(arg)
 
@@ -1299,6 +1302,8 @@ if __name__ == "__main__":
                     key=os.path.getmtime, default=None
                 )
                 if latest:
+                    if _is_active_session(latest):
+                        print("[WARN] Session is still active (has .lock file). Uploading snapshot.")
                     paths = [latest]
 
         if not paths:
@@ -1327,7 +1332,6 @@ if __name__ == "__main__":
                     api_url=api_url,
                     api_key=api_key,
                     user_id=user_id,
-                    trace_name=trace_name,
                     since_ts=since_ts if since_str else None,
                     until_ts=until_ts if since_str else None,
                 )
