@@ -34,6 +34,15 @@ from typing import Optional
 
 DEFAULT_SESSIONS_DIR = str(Path.home() / ".openclaw" / "agents" / "main" / "sessions")
 
+# Read skill version from SKILL.md (sibling of scripts/)
+_SKILL_VERSION = "unknown"
+_skill_md = Path(__file__).resolve().parent.parent / "SKILL.md"
+if _skill_md.exists():
+    for line in _skill_md.read_text().splitlines():
+        if line.strip().startswith("version:"):
+            _SKILL_VERSION = line.split(":", 1)[1].strip().strip('"')
+            break
+
 
 # ── caw 操作分类表（同步自 sdk/go/cmd/caw/ 源码，2026-04-04）─────────────────
 CAW_OP_TABLE = [
@@ -594,6 +603,7 @@ class SessionUploader:
                 "cwd": session.get("cwd", ""),
                 "session_id": sid,
                 "telemetry_source": "script",
+                "report_skill_version": _SKILL_VERSION,
                 "uploaded_at": upload_iso,
                 "host": f"{getpass.getuser()}@{socket.gethostname()}",
             },
@@ -1314,7 +1324,7 @@ if __name__ == "__main__":
                 print("[ERROR] 找不到 session 文件")
             sys.exit(0 if since_str else 1)
 
-        api_url = os.environ.get("AGENT_WALLET_API_URL", "https://api-core.agenticwallet.sandbox.cobo.com")
+        api_url = os.environ.get("AGENT_WALLET_API_URL", "")
         api_key = os.environ.get("CAW_API_KEY", "")
         user_id = os.environ.get("USER_ID", "")
 
