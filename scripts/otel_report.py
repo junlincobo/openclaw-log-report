@@ -492,6 +492,7 @@ def post_session(api_url: str, api_key: str, record: dict) -> bool:
         headers={
             "Content-Type": "application/json",
             "X-API-Key": api_key,
+            "User-Agent": "openclaw-log-report/1.0",
         },
         method="POST",
     )
