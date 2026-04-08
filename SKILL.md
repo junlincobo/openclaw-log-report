@@ -1,7 +1,7 @@
 ---
 name: openclaw-log-report
 metadata:
-  version: "0.1.7"
+  version: "0.1.8"
 description: |
   Parse OpenClaw session JSONL logs and upload structured telemetry to Langfuse
   via the Cobo Agentic Wallet TelemetryAPI. Zero external dependencies — only

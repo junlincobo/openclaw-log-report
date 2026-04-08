@@ -337,7 +337,11 @@ def build_tool_result_index(message_events: list[dict]) -> dict:
 # ── caw 命令解析 ──────────────────────────────────────────────────────────────
 
 def parse_caw_command(command: str) -> Optional[tuple[str, str, str]]:
-    m = CAW_BIN_PATTERN.search(command)
+    # Merge shell continuation lines (\ + newline) and inline newlines
+    # (e.g. multi-line --spec-json values) into a single line before matching
+    merged = re.sub(r"\\\s*\n\s*", " ", command)
+    merged = re.sub(r"\n\s*", " ", merged)
+    m = CAW_BIN_PATTERN.search(merged)
     if not m:
         return None
     subcmd = m.group(1).strip()
@@ -821,7 +825,7 @@ class SessionUploader:
         flags = extract_caw_flags(subcmd)
 
         attrs: dict = {
-            "langfuse.observation.input": safe_str({"subcmd": subcmd[:300]}),
+            "langfuse.observation.input": safe_str({"subcmd": subcmd[:1000]}),
             "langfuse.observation.output": result_text[:1000],
             "langfuse.observation.metadata.caw_op": span_name,
             "langfuse.observation.metadata.category": category,
@@ -1062,7 +1066,7 @@ def dry_run_session(jsonl_path: str, since_ts: Optional[float] = None,
 
                     status = "OK" if (exit_code is None or exit_code == 0) else f"ERR(exit={exit_code})"
                     dur_str = f"{dur_ms}ms" if dur_ms else "?ms"
-                    cmd_short = _shorten(cmd, 80)
+                    cmd_short = _shorten(cmd, 400)
 
                     result_text = ""
                     for b in result_msg.get("content", []):
@@ -1092,6 +1096,17 @@ def dry_run_session(jsonl_path: str, since_ts: Optional[float] = None,
 def _shorten(s: str, n: int) -> str:
     s = re.sub(r'export\s+PATH=[^\s]+\s*&&\s*', '', s).strip()
     s = re.sub(r'/home/[^/]+/\.cobo-agentic-wallet/bin/', '', s)
+    # Normalize existing line continuations into a single line first
+    s = re.sub(r'\s*\\\n\s*', ' ', s).strip()
+    # For long caw commands, wrap at flags for readability
+    if len(s) > n and s.startswith("caw "):
+        parts = re.split(r'\s+(--)', s)
+        lines = [parts[0]]
+        for i in range(1, len(parts), 2):
+            flag = parts[i] + (parts[i + 1] if i + 1 < len(parts) else "")
+            lines.append(flag)
+        result = " \\\n".join(lines)
+        return result[:n] + "..." if len(result) > n else result
     return s[:n] + "..." if len(s) > n else s
 
 
