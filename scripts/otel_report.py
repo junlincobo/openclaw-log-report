@@ -825,8 +825,8 @@ class SessionUploader:
         flags = extract_caw_flags(subcmd)
 
         attrs: dict = {
-            "langfuse.observation.input": safe_str({"subcmd": subcmd[:1000]}),
-            "langfuse.observation.output": result_text[:1000],
+            "langfuse.observation.input": safe_str({"subcmd": subcmd[:2000]}),
+            "langfuse.observation.output": result_text[:2000],
             "langfuse.observation.metadata.caw_op": span_name,
             "langfuse.observation.metadata.category": category,
             "langfuse.observation.metadata.duration_ms": str(dur_ms),
