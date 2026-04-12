@@ -1,6 +1,6 @@
 """
 openclaw session.jsonl → TelemetryAPI 上报
-通过 POST /api/v1/telemetry 走后端统一通道，由后端转发到 Langfuse。
+通过 POST /api/v1/telemetry 走后端统一通道上报。
 零外部依赖，只需 caw 已安装（自动读取 ~/.cobo-agentic-wallet/ 的 API key）。
 
 上报策略: 每轮 turn 一次 POST，turn record 携带 children（llm_call + tool_call）。
@@ -22,6 +22,7 @@ import os
 import random
 import re
 import glob
+import shlex
 import socket
 import string
 import sys
@@ -82,6 +83,7 @@ CAW_OP_TABLE = [
     (["pending get"],                 "caw.pending.get",       "auth"),
     # Pact
     (["pact submit"],                 "caw.pact.submit",       "auth"),
+    (["pact create"],                 "caw.pact.create",       "auth"),
     (["pact status"],                 "caw.pact.status",       "auth"),
     (["pact show"],                   "caw.pact.show",         "auth"),
     (["pact events"],                 "caw.pact.events",       "auth"),
@@ -148,12 +150,6 @@ CAW_OP_TABLE = [
     (["--help", "-h"],                "caw.help",              "meta"),
 ]
 
-CAW_BIN_PATTERN = re.compile(
-    r"(?:^|&&\s*)"
-    r"(?:[^\s]*?/)?caw\s+"
-    r"(.*?)(?:\s+&&|\s*$)",
-    re.MULTILINE
-)
 SKILL_INSTALL_PATTERN = re.compile(
     r"(?:npx\s+skills\s+add|clawhub\s+install|npx\s+skills\s+update)\s+(\S+)"
 )
@@ -336,24 +332,64 @@ def build_tool_result_index(message_events: list[dict]) -> dict:
 
 # ── caw 命令解析 ──────────────────────────────────────────────────────────────
 
+def _find_caw_token(tokens: list[str]) -> int:
+    """Return the index of the 'caw' token, or -1 if not found.
+
+    Skips env-var assignments (KEY=VALUE) and recognizes path-prefixed
+    forms like /usr/local/bin/caw or ./caw.
+    """
+    for i, tok in enumerate(tokens):
+        # Skip env-var assignments (KEY=VALUE)
+        if "=" in tok and not tok.startswith("-"):
+            continue
+        # Skip if this token is a flag value (previous token starts with --)
+        if i > 0 and tokens[i - 1].startswith("--"):
+            continue
+        basename = tok.rsplit("/", 1)[-1] if "/" in tok else tok
+        if basename == "caw":
+            return i
+    return -1
+
+
 def parse_caw_command(command: str) -> Optional[tuple[str, str, str]]:
-    # Merge shell continuation lines (\ + newline) and inline newlines
-    # (e.g. multi-line --spec-json values) into a single line before matching
+    # Merge shell continuation lines and inline newlines into a single line
     merged = re.sub(r"\\\s*\n\s*", " ", command)
     merged = re.sub(r"\n\s*", " ", merged)
-    m = CAW_BIN_PATTERN.search(merged)
-    if not m:
+
+    # Tokenize (shlex handles quoting; fall back to split on malformed input)
+    try:
+        tokens = shlex.split(merged)
+    except ValueError:
+        tokens = merged.split()
+
+    idx = _find_caw_token(tokens)
+    if idx < 0:
         return None
-    subcmd = m.group(1).strip()
+
+    # Everything after 'caw' is subcmd, stop at shell chain operators
+    subcmd_tokens = []
+    for tok in tokens[idx + 1:]:
+        if tok in ("&&", ";", "||"):
+            break
+        subcmd_tokens.append(tok)
+    subcmd = " ".join(subcmd_tokens)
+
+    if not subcmd:
+        return "caw.unknown", "unknown", ""
+
     # Detect help invocations before cleaning
     if "--help" in subcmd or subcmd.endswith("-h"):
         return "caw.help", "meta", subcmd
+
     clean = re.sub(r"--(?:format|env|profile|timeout|verbose|api-key|api-url)\s*\S*", "", subcmd).strip()
     for prefixes, span_name, category in CAW_OP_TABLE:
         for p in prefixes:
             if clean.startswith(p):
                 return span_name, category, subcmd
-    return "caw.unknown", "unknown", subcmd
+    # Auto-generate span name from first 1-2 non-flag tokens
+    parts = [t for t in clean.split() if not t.startswith("-")][:2]
+    auto_name = "caw." + ".".join(parts).replace("-", "_") if parts else "caw.unknown"
+    return auto_name, "unknown", subcmd
 
 
 def extract_caw_flags(subcmd: str) -> dict:
@@ -563,11 +599,18 @@ class SessionUploader:
         model = session["model"]
         prov = session["provider"]
 
-        first_user = next(
-            (e for e in evts if e.get("message", {}).get("role") == "user"), None
-        )
-        if first_user and not user_id:
-            user_id = extract_sender_id(first_user.get("message", {})) or "unknown"
+        # user_id: 优先用 caw config 的 agent_id（与后端 principal.external_id 一致），
+        # 其次从 session 首条 user message 提取，最后 fallback 到 "unknown"
+        if not user_id:
+            user_id = self.resource.get("caw.agent_id", "")
+        if not user_id:
+            first_user = next(
+                (e for e in evts if e.get("message", {}).get("role") == "user"), None
+            )
+            if first_user:
+                user_id = extract_sender_id(first_user.get("message", {})) or "unknown"
+        if not user_id:
+            user_id = "unknown"
 
         start_ns = ts_to_ns(session["started_at"])
         all_events = [ev for turn in turns for ev in turn]
@@ -612,7 +655,7 @@ class SessionUploader:
                 "host": f"{getpass.getuser()}@{socket.gethostname()}",
             },
             "attributes": {
-                "langfuse.observation.input": safe_str({
+                "observation.input": safe_str({
                     "session_id": sid,
                     "model": model,
                     "turns": len(turns),
@@ -674,10 +717,10 @@ class SessionUploader:
             "start_time_unix_nano": turn_start_ns,
             "end_time_unix_nano": turn_end_ns,
             "attributes": {
-                "langfuse.observation.input": safe_str({"role": "user", "content": user_text_raw}),
-                "langfuse.observation.output": safe_str({"role": "assistant", "content": final_text}) if final_text else None,
-                "langfuse.trace.metadata.turn_index": str(idx),
-                "langfuse.trace.metadata.sender": sender,
+                "observation.input": safe_str({"role": "user", "content": user_text_raw}),
+                "observation.output": safe_str({"role": "assistant", "content": final_text}) if final_text else None,
+                "trace.metadata.turn_index": str(idx),
+                "trace.metadata.sender": sender,
             },
             "children": children if children else None,
         }
@@ -711,17 +754,17 @@ class SessionUploader:
             "end_time_unix_nano": llm_end,
             "attributes": {
                 "gen_ai.request.model": msg.get("model", model),
-                "langfuse.observation.model.name": msg.get("model", model),
+                "observation.model.name": msg.get("model", model),
                 "gen_ai.usage.input_tokens": usage.get("input", 0),
                 "gen_ai.usage.output_tokens": usage.get("output", 0),
-                "langfuse.observation.output": safe_str(
+                "observation.output": safe_str(
                     [b.get("name") or b.get("text", "")[:80] for b in content[:5]]
                 ),
-                "langfuse.trace.metadata.provider": provider,
-                "langfuse.trace.metadata.api": msg.get("api", ""),
-                "langfuse.trace.metadata.stop_reason": msg.get("stopReason", ""),
-                "langfuse.trace.metadata.response_id": msg.get("responseId", ""),
-                "langfuse.observation.metadata.tool_calls_count": str(len(tool_calls)),
+                "trace.metadata.provider": provider,
+                "trace.metadata.api": msg.get("api", ""),
+                "trace.metadata.stop_reason": msg.get("stopReason", ""),
+                "trace.metadata.response_id": msg.get("responseId", ""),
+                "observation.metadata.tool_calls_count": str(len(tool_calls)),
             },
         })
 
@@ -774,7 +817,8 @@ class SessionUploader:
                 span_name, category, subcmd = caw_info
                 return self._build_caw_child(
                     span_name, category, subcmd, result_text,
-                    dur_ms, ts_ns, result_ts_ns, status_ok, exit_code
+                    dur_ms, ts_ns, result_ts_ns, status_ok, exit_code,
+                    full_cmd=cmd,
                 )
             if SKILL_INSTALL_PATTERN.search(cmd):
                 category = "skill_install"
@@ -794,18 +838,18 @@ class SessionUploader:
             category = name
 
         attrs: dict = {
-            "langfuse.observation.input": safe_str(args, 1000),
-            "langfuse.observation.output": result_text[:1000],
-            "langfuse.observation.metadata.tool_call_id": call_id,
-            "langfuse.observation.metadata.tool_name": name,
-            "langfuse.observation.metadata.category": category,
-            "langfuse.observation.metadata.duration_ms": str(dur_ms),
-            "langfuse.observation.metadata.exit_code": str(exit_code),
+            "observation.input": safe_str(args, 1000),
+            "observation.output": result_text[:2000],
+            "observation.metadata.tool_call_id": call_id,
+            "observation.metadata.tool_name": name,
+            "observation.metadata.category": category,
+            "observation.metadata.duration_ms": str(dur_ms),
+            "observation.metadata.exit_code": str(exit_code),
         }
         if category == "skill_install":
             m = SKILL_INSTALL_PATTERN.search(args.get("command", ""))
             if m:
-                attrs["langfuse.trace.metadata.skill_package"] = m.group(1)
+                attrs["trace.metadata.skill_package"] = m.group(1)
 
         end_ns = result_ts_ns or (ts_ns + int(dur_ms * 1e6) if ts_ns and dur_ms else ts_ns)
         return {
@@ -821,44 +865,45 @@ class SessionUploader:
     # ── caw span ──────────────────────────────────────────────────────────────
 
     def _build_caw_child(self, span_name, category, subcmd, result_text,
-                          dur_ms, ts_ns, result_ts_ns, status_ok, exit_code) -> dict:
+                          dur_ms, ts_ns, result_ts_ns, status_ok, exit_code,
+                          full_cmd: str = "") -> dict:
         flags = extract_caw_flags(subcmd)
 
         attrs: dict = {
-            "langfuse.observation.input": safe_str({"subcmd": subcmd[:2000]}),
-            "langfuse.observation.output": result_text[:2000],
-            "langfuse.observation.metadata.caw_op": span_name,
-            "langfuse.observation.metadata.category": category,
-            "langfuse.observation.metadata.duration_ms": str(dur_ms),
-            "langfuse.observation.metadata.exit_code": str(exit_code),
-            "langfuse.trace.metadata.caw_op": span_name,
-            "langfuse.trace.metadata.caw_category": category,
+            "observation.input": safe_str({"command": (full_cmd or subcmd)[:2000]}),
+            "observation.output": result_text[:2000],
+            "observation.metadata.caw_op": span_name,
+            "observation.metadata.category": category,
+            "observation.metadata.duration_ms": str(dur_ms),
+            "observation.metadata.exit_code": str(exit_code),
+            "trace.metadata.caw_op": span_name,
+            "trace.metadata.caw_category": category,
         }
         for k, v in flags.items():
-            attrs[f"langfuse.trace.metadata.caw_{k}"] = v
+            attrs[f"trace.metadata.caw_{k}"] = v
 
         if "onboard" in span_name:
             parsed = parse_onboard_table(result_text)
             for k, v in parsed.items():
                 if v and v not in ("-", ""):
-                    attrs[f"langfuse.trace.metadata.onboard_{k}"] = v
+                    attrs[f"trace.metadata.onboard_{k}"] = v
 
         if category == "transaction":
             tx_fields = parse_tx_result(result_text)
             for k, v in tx_fields.items():
-                attrs[f"langfuse.trace.metadata.tx_{k}"] = v
+                attrs[f"trace.metadata.tx_{k}"] = v
             if "policy_denial" in tx_fields or not status_ok:
-                attrs["langfuse.observation.level"] = "WARNING"
-                attrs["langfuse.observation.metadata.policy_denied"] = "true"
+                attrs["observation.level"] = "WARNING"
+                attrs["observation.metadata.policy_denied"] = "true"
 
         if UPDATE_SIGNAL.search(result_text):
-            attrs["langfuse.trace.metadata.caw_update_available"] = "true"
+            attrs["trace.metadata.caw_update_available"] = "true"
 
         if "context" in flags:
             try:
                 ctx = json.loads(flags["context"])
-                attrs["langfuse.trace.metadata.openclaw_channel"] = ctx.get("channel", "")
-                attrs["langfuse.trace.metadata.openclaw_target"] = ctx.get("target", "")
+                attrs["trace.metadata.openclaw_channel"] = ctx.get("channel", "")
+                attrs["trace.metadata.openclaw_target"] = ctx.get("target", "")
             except Exception:
                 pass
 
@@ -1266,6 +1311,7 @@ if __name__ == "__main__":
         cli_args.remove("--watch")
     since_str = _extract_named_arg(cli_args, "--since")
     until_str = _extract_named_arg(cli_args, "--until")
+    user_id_arg = _extract_named_arg(cli_args, "--user-id")
 
     if watch:
         watch_dir = cli_args[0] if cli_args else DEFAULT_SESSIONS_DIR
@@ -1341,7 +1387,7 @@ if __name__ == "__main__":
 
         api_url = os.environ.get("AGENT_WALLET_API_URL", "")
         api_key = os.environ.get("CAW_API_KEY", "")
-        user_id = os.environ.get("USER_ID", "")
+        user_id = user_id_arg or os.environ.get("USER_ID", "")
 
         for idx, path in enumerate(sorted(paths)):
             if len(paths) > 1:

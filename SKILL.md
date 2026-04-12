@@ -1,25 +1,25 @@
 ---
 name: openclaw-log-report
 metadata:
-  version: "0.1.8"
+  version: "0.1.9"
 description: |
-  Parse OpenClaw session JSONL logs and upload structured telemetry to Langfuse
+  Parse OpenClaw session JSONL logs and upload structured telemetry
   via the Cobo Agentic Wallet TelemetryAPI. Zero external dependencies — only
   requires Python 3 and a valid caw installation (API key auto-detected).
   Use when: user wants to analyze an OpenClaw session, upload session telemetry,
-  view session traces in Langfuse, or debug OpenClaw agent behavior.
+  view session traces, or debug OpenClaw agent behavior.
 ---
 
 # OpenClaw Log Report
 
-Parse OpenClaw `session.jsonl` logs → structured telemetry → Langfuse.
+Parse OpenClaw `session.jsonl` logs → structured telemetry → TelemetryAPI.
 
 ## What It Does
 
-Reads an OpenClaw session log file and uploads it as a structured trace to Langfuse:
+Reads an OpenClaw session log file and uploads it as a structured trace:
 
 ```
-Langfuse Trace
+Trace
 └── session:<id>                    ← root span (full session)
     ├── turn:0                      ← user message + agent response
     │   ├── OpenAI-generation       ← LLM call (model, tokens, latency)
@@ -135,7 +135,7 @@ Without arguments, uploads the most recent session file from the default path.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `AGENT_WALLET_API_URL` | `https://api-core.agenticwallet.sandbox.cobo.com` | Backend API URL |
-| `USER_ID` | auto-detected from session messages | User identifier in Langfuse |
+| `USER_ID` | auto-detected from session messages | User identifier for trace |
 
 **Environments:**
 
@@ -170,9 +170,9 @@ The script classifies 106 caw CLI subcommands into categories:
 | `audit` | audit logs |
 | `monitor` | track |
 
-## Langfuse Dimensions
+## Trace Dimensions
 
-| Langfuse Dimension | Value | Source |
+| Dimension | Value | Source |
 |-------------------|-------|--------|
 | Trace Name | `script_{user}@{hostname}_{MMDDHHmm}` | User + hostname + timestamp (UTC+8) |
 | Session ID | OpenClaw session UUID | session.jsonl |
@@ -182,7 +182,7 @@ The script classifies 106 caw CLI subcommands into categories:
 ## Constraints
 
 - **Don't modify this script** — treat it as a read-only tool
-- **Don't modify uploaded reports** in Langfuse
+- **Don't modify uploaded reports** on the backend
 - **Don't retry after success** — if upload prints `Status: OK`, do not re-run the command
 - **Uploading the current session** is allowed, but note it's still being written — the upload captures a snapshot at that moment
 - **Use `python3`** not `python` — some servers only have `python3`
@@ -194,7 +194,7 @@ The script classifies 106 caw CLI subcommands into categories:
 
 | 告警 | 原因 |
 |------|------|
-| **网络请求** | 脚本通过 `urllib.request` POST 数据到 TelemetryAPI（后端转发至 Langfuse） |
+| **网络请求** | 脚本通过 `urllib.request` POST 数据到 TelemetryAPI |
 | **文件读取** | 读取 `~/.openclaw/` 下的 session.jsonl 日志文件 |
 | **凭证访问** | 从 `~/.cobo-agentic-wallet/` 读取 caw API key 用于鉴权 |
 | **主机信息** | 通过 `socket.gethostname()` 获取机器名写入 metadata |
