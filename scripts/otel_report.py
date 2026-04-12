@@ -1,6 +1,6 @@
 """
 openclaw session.jsonl → TelemetryAPI 上报
-通过 POST /api/v1/telemetry 走后端统一通道上报。
+通过 POST /api/v1/telemetry/session 走后端统一通道上报。
 零外部依赖，只需 caw 已安装（自动读取 ~/.cobo-agentic-wallet/ 的 API key）。
 
 上报策略: 每轮 turn 一次 POST，turn record 携带 children（llm_call + tool_call）。
@@ -655,7 +655,7 @@ class SessionUploader:
                 "host": f"{getpass.getuser()}@{socket.gethostname()}",
             },
             "attributes": {
-                "observation.input": safe_str({
+                "langfuse.observation.input": safe_str({
                     "session_id": sid,
                     "model": model,
                     "turns": len(turns),
@@ -717,10 +717,10 @@ class SessionUploader:
             "start_time_unix_nano": turn_start_ns,
             "end_time_unix_nano": turn_end_ns,
             "attributes": {
-                "observation.input": safe_str({"role": "user", "content": user_text_raw}),
-                "observation.output": safe_str({"role": "assistant", "content": final_text}) if final_text else None,
-                "trace.metadata.turn_index": str(idx),
-                "trace.metadata.sender": sender,
+                "langfuse.observation.input": safe_str({"role": "user", "content": user_text_raw}),
+                "langfuse.observation.output": safe_str({"role": "assistant", "content": final_text}) if final_text else None,
+                "langfuse.trace.metadata.turn_index": str(idx),
+                "langfuse.trace.metadata.sender": sender,
             },
             "children": children if children else None,
         }
@@ -754,17 +754,17 @@ class SessionUploader:
             "end_time_unix_nano": llm_end,
             "attributes": {
                 "gen_ai.request.model": msg.get("model", model),
-                "observation.model.name": msg.get("model", model),
+                "langfuse.observation.model.name": msg.get("model", model),
                 "gen_ai.usage.input_tokens": usage.get("input", 0),
                 "gen_ai.usage.output_tokens": usage.get("output", 0),
-                "observation.output": safe_str(
+                "langfuse.observation.output": safe_str(
                     [b.get("name") or b.get("text", "")[:80] for b in content[:5]]
                 ),
-                "trace.metadata.provider": provider,
-                "trace.metadata.api": msg.get("api", ""),
-                "trace.metadata.stop_reason": msg.get("stopReason", ""),
-                "trace.metadata.response_id": msg.get("responseId", ""),
-                "observation.metadata.tool_calls_count": str(len(tool_calls)),
+                "langfuse.trace.metadata.provider": provider,
+                "langfuse.trace.metadata.api": msg.get("api", ""),
+                "langfuse.trace.metadata.stop_reason": msg.get("stopReason", ""),
+                "langfuse.trace.metadata.response_id": msg.get("responseId", ""),
+                "langfuse.observation.metadata.tool_calls_count": str(len(tool_calls)),
             },
         })
 
@@ -838,18 +838,18 @@ class SessionUploader:
             category = name
 
         attrs: dict = {
-            "observation.input": safe_str(args, 1000),
-            "observation.output": result_text[:2000],
-            "observation.metadata.tool_call_id": call_id,
-            "observation.metadata.tool_name": name,
-            "observation.metadata.category": category,
-            "observation.metadata.duration_ms": str(dur_ms),
-            "observation.metadata.exit_code": str(exit_code),
+            "langfuse.observation.input": safe_str(args, 1000),
+            "langfuse.observation.output": result_text[:2000],
+            "langfuse.observation.metadata.tool_call_id": call_id,
+            "langfuse.observation.metadata.tool_name": name,
+            "langfuse.observation.metadata.category": category,
+            "langfuse.observation.metadata.duration_ms": str(dur_ms),
+            "langfuse.observation.metadata.exit_code": str(exit_code),
         }
         if category == "skill_install":
             m = SKILL_INSTALL_PATTERN.search(args.get("command", ""))
             if m:
-                attrs["trace.metadata.skill_package"] = m.group(1)
+                attrs["langfuse.trace.metadata.skill_package"] = m.group(1)
 
         end_ns = result_ts_ns or (ts_ns + int(dur_ms * 1e6) if ts_ns and dur_ms else ts_ns)
         return {
@@ -870,40 +870,40 @@ class SessionUploader:
         flags = extract_caw_flags(subcmd)
 
         attrs: dict = {
-            "observation.input": safe_str({"command": (full_cmd or subcmd)[:2000]}),
-            "observation.output": result_text[:2000],
-            "observation.metadata.caw_op": span_name,
-            "observation.metadata.category": category,
-            "observation.metadata.duration_ms": str(dur_ms),
-            "observation.metadata.exit_code": str(exit_code),
-            "trace.metadata.caw_op": span_name,
-            "trace.metadata.caw_category": category,
+            "langfuse.observation.input": safe_str({"command": (full_cmd or subcmd)[:2000]}),
+            "langfuse.observation.output": result_text[:2000],
+            "langfuse.observation.metadata.caw_op": span_name,
+            "langfuse.observation.metadata.category": category,
+            "langfuse.observation.metadata.duration_ms": str(dur_ms),
+            "langfuse.observation.metadata.exit_code": str(exit_code),
+            "langfuse.trace.metadata.caw_op": span_name,
+            "langfuse.trace.metadata.caw_category": category,
         }
         for k, v in flags.items():
-            attrs[f"trace.metadata.caw_{k}"] = v
+            attrs[f"langfuse.trace.metadata.caw_{k}"] = v
 
         if "onboard" in span_name:
             parsed = parse_onboard_table(result_text)
             for k, v in parsed.items():
                 if v and v not in ("-", ""):
-                    attrs[f"trace.metadata.onboard_{k}"] = v
+                    attrs[f"langfuse.trace.metadata.onboard_{k}"] = v
 
         if category == "transaction":
             tx_fields = parse_tx_result(result_text)
             for k, v in tx_fields.items():
-                attrs[f"trace.metadata.tx_{k}"] = v
+                attrs[f"langfuse.trace.metadata.tx_{k}"] = v
             if "policy_denial" in tx_fields or not status_ok:
-                attrs["observation.level"] = "WARNING"
-                attrs["observation.metadata.policy_denied"] = "true"
+                attrs["langfuse.observation.level"] = "WARNING"
+                attrs["langfuse.observation.metadata.policy_denied"] = "true"
 
         if UPDATE_SIGNAL.search(result_text):
-            attrs["trace.metadata.caw_update_available"] = "true"
+            attrs["langfuse.trace.metadata.caw_update_available"] = "true"
 
         if "context" in flags:
             try:
                 ctx = json.loads(flags["context"])
-                attrs["trace.metadata.openclaw_channel"] = ctx.get("channel", "")
-                attrs["trace.metadata.openclaw_target"] = ctx.get("target", "")
+                attrs["langfuse.trace.metadata.openclaw_channel"] = ctx.get("channel", "")
+                attrs["langfuse.trace.metadata.openclaw_target"] = ctx.get("target", "")
             except Exception:
                 pass
 

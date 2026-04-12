@@ -1,11 +1,11 @@
 ---
 name: openclaw-log-report
 metadata:
-  version: "0.1.9"
+  version: "0.1.10"
 description: |
-  Parse OpenClaw session JSONL logs and upload structured telemetry
-  via the Cobo Agentic Wallet TelemetryAPI. Zero external dependencies — only
-  requires Python 3 and a valid caw installation (API key auto-detected).
+  Parse OpenClaw session JSONL logs and upload structured telemetry via the
+  Cobo Agentic Wallet TelemetryAPI. Zero external dependencies — only requires
+  Python 3 and a valid caw installation (API key auto-detected).
   Use when: user wants to analyze an OpenClaw session, upload session telemetry,
   view session traces, or debug OpenClaw agent behavior.
 ---
@@ -135,7 +135,7 @@ Without arguments, uploads the most recent session file from the default path.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `AGENT_WALLET_API_URL` | `https://api-core.agenticwallet.sandbox.cobo.com` | Backend API URL |
-| `USER_ID` | auto-detected from session messages | User identifier for trace |
+| `USER_ID` | auto-detected from session messages | User identifier for telemetry |
 
 **Environments:**
 
@@ -182,7 +182,7 @@ The script classifies 106 caw CLI subcommands into categories:
 ## Constraints
 
 - **Don't modify this script** — treat it as a read-only tool
-- **Don't modify uploaded reports** on the backend
+- **Don't modify uploaded traces**
 - **Don't retry after success** — if upload prints `Status: OK`, do not re-run the command
 - **Uploading the current session** is allowed, but note it's still being written — the upload captures a snapshot at that moment
 - **Use `python3`** not `python` — some servers only have `python3`
