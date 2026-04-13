@@ -332,11 +332,19 @@ def build_tool_result_index(message_events: list[dict]) -> dict:
 
 # ── caw 命令解析 ──────────────────────────────────────────────────────────────
 
+_PROBE_COMMANDS = {
+    "which", "command", "type", "ls", "cat", "file", "stat",
+    "pip", "pip3", "npm", "pipx", "brew", "apt", "dpkg",
+    "head", "tail", "grep", "rg", "find", "echo",
+}
+
+
 def _find_caw_token(tokens: list[str]) -> int:
     """Return the index of the 'caw' token, or -1 if not found.
 
-    Skips env-var assignments (KEY=VALUE) and recognizes path-prefixed
-    forms like /usr/local/bin/caw or ./caw.
+    Skips env-var assignments (KEY=VALUE), flag values, and `caw` tokens
+    that appear as arguments to probing commands (which caw, ls /usr/bin/caw).
+    Recognizes path-prefixed forms like /usr/local/bin/caw or ./caw.
     """
     for i, tok in enumerate(tokens):
         # Skip env-var assignments (KEY=VALUE)
@@ -346,8 +354,16 @@ def _find_caw_token(tokens: list[str]) -> int:
         if i > 0 and tokens[i - 1].startswith("--"):
             continue
         basename = tok.rsplit("/", 1)[-1] if "/" in tok else tok
-        if basename == "caw":
-            return i
+        if basename != "caw":
+            continue
+        # Skip if 'caw' appears as arg to a probe command (which caw, ls caw*, etc.)
+        # Walk back skipping env-var tokens to find the real command at this position.
+        j = i - 1
+        while j >= 0 and ("=" in tokens[j] and not tokens[j].startswith("-")):
+            j -= 1
+        if j >= 0 and tokens[j] in _PROBE_COMMANDS:
+            continue
+        return i
     return -1
 
 
@@ -1075,7 +1091,8 @@ def dry_run_session(jsonl_path: str, since_ts: Optional[float] = None,
                 for tc in tool_calls:
                     call_id = tc.get("id", "")
                     name = tc.get("name", "")
-                    args = tc.get("arguments", {})
+                    # OpenClaw uses "arguments", Claude Code uses "input"
+                    args = tc.get("arguments") or tc.get("input") or {}
                     cmd = args.get("command", "") or args.get("action", "") or args.get("path", "")
 
                     result_ev = tr_idx.get(call_id)
@@ -1092,7 +1109,8 @@ def dry_run_session(jsonl_path: str, since_ts: Optional[float] = None,
                         except Exception:
                             pass
 
-                    if name == "exec":
+                    name_lower = name.lower()
+                    if name_lower in ("exec", "bash"):
                         caw_info = parse_caw_command(cmd)
                         if caw_info:
                             span_name, category, _ = caw_info
@@ -1102,9 +1120,9 @@ def dry_run_session(jsonl_path: str, since_ts: Optional[float] = None,
                             span_name, category = "env_bootstrap", "env_bootstrap"
                         else:
                             span_name, category = f"exec:{name}", "exec"
-                    elif name == "read":
+                    elif name_lower in ("read", "grep", "glob"):
                         span_name, category = f"file_read:{name}", "file_read"
-                    elif name == "process":
+                    elif name_lower == "process":
                         span_name, category = "process_poll", "process_poll"
                     else:
                         span_name, category = name, name
@@ -1114,13 +1132,18 @@ def dry_run_session(jsonl_path: str, since_ts: Optional[float] = None,
                     cmd_short = _shorten(cmd, 400)
 
                     result_text = ""
-                    for b in result_msg.get("content", []):
-                        if isinstance(b, str):
-                            result_text = b[:60]
-                            break
-                        if isinstance(b, dict) and b.get("type") == "text":
-                            result_text = b.get("text", "")[:60]
-                            break
+                    result_content = result_msg.get("content", [])
+                    # Claude Code may store tool_result content as a plain string
+                    if isinstance(result_content, str):
+                        result_text = result_content[:60]
+                    else:
+                        for b in result_content:
+                            if isinstance(b, str):
+                                result_text = b[:60]
+                                break
+                            if isinstance(b, dict) and b.get("type") == "text":
+                                result_text = b.get("text", "")[:60]
+                                break
 
                     print(f"  +- {span_name}  [{result_ts}]  {status}  {dur_str}")
                     print(f"  |  cmd: {cmd_short}")
