@@ -1,22 +1,27 @@
 ---
 name: openclaw-log-report
 metadata:
-  version: "0.1.11"
+  version: "0.1.12"
 description: |
-  Parse OpenClaw session JSONL logs and upload structured telemetry via the
-  Cobo Agentic Wallet TelemetryAPI. Zero external dependencies — only requires
-  Python 3 and a valid caw installation (API key auto-detected).
-  Use when: user wants to analyze an OpenClaw session, upload session telemetry,
-  view session traces, or debug OpenClaw agent behavior.
+  Parse OpenClaw or Claude Code session JSONL logs and upload structured
+  telemetry via the Cobo Agentic Wallet TelemetryAPI. Zero external
+  dependencies — only requires Python 3 and a valid caw installation
+  (API key auto-detected).
+  Use when: user wants to analyze an OpenClaw or Claude Code session,
+  upload session telemetry, view session traces, or debug agent behavior.
 ---
 
-# OpenClaw Log Report
+# OpenClaw / Claude Code Log Report
 
-Parse OpenClaw `session.jsonl` logs → structured telemetry → TelemetryAPI.
+Parse OpenClaw or Claude Code `session.jsonl` logs → structured telemetry → TelemetryAPI.
+
+Both session formats are auto-detected:
+- **OpenClaw**: `~/.openclaw/agents/main/sessions/*.jsonl`
+- **Claude Code**: `~/.claude/projects/*/*.jsonl`
 
 ## What It Does
 
-Reads an OpenClaw session log file and uploads it as a structured trace:
+Reads a session log file (OpenClaw or Claude Code) and uploads it as a structured trace:
 
 ```
 Trace
