@@ -1,27 +1,32 @@
 ---
 name: openclaw-log-report
 metadata:
-  version: "0.1.12"
+  version: "0.1.13"
 description: |
-  Parse OpenClaw or Claude Code session JSONL logs and upload structured
-  telemetry via the Cobo Agentic Wallet TelemetryAPI. Zero external
-  dependencies — only requires Python 3 and a valid caw installation
-  (API key auto-detected).
-  Use when: user wants to analyze an OpenClaw or Claude Code session,
-  upload session telemetry, view session traces, or debug agent behavior.
+  Parse OpenClaw, Claude Code, or Hermes agent session logs and upload
+  structured telemetry via the Cobo Agentic Wallet TelemetryAPI. Zero
+  external dependencies — only requires Python 3 and a valid caw
+  installation (API key auto-detected).
+  Use when: user wants to analyze a session from any supported agent
+  platform, upload session telemetry, view session traces, or debug
+  agent behavior.
 ---
 
-# OpenClaw / Claude Code Log Report
+# Agent Session Log Report
 
-Parse OpenClaw or Claude Code `session.jsonl` logs → structured telemetry → TelemetryAPI.
+Parse agent session logs → structured telemetry → TelemetryAPI.
 
-Both session formats are auto-detected:
-- **OpenClaw**: `~/.openclaw/agents/main/sessions/*.jsonl`
-- **Claude Code**: `~/.claude/projects/*/*.jsonl`
+Supports three agent platforms (auto-detected):
+
+| Platform | Format | Default Path |
+|----------|--------|-------------|
+| **OpenClaw** | JSONL | `~/.openclaw/agents/main/sessions/*.jsonl` |
+| **Claude Code** | JSONL | `~/.claude/projects/*/*.jsonl` |
+| **Hermes** | JSON | `~/.hermes/sessions/session_*.json` |
 
 ## What It Does
 
-Reads a session log file (OpenClaw or Claude Code) and uploads it as a structured trace:
+Reads a session log file and uploads it as a structured trace:
 
 ```
 Trace
@@ -50,14 +55,18 @@ Each span includes:
 
 1. **caw installed and onboarded** — the script reads API key from `~/.cobo-agentic-wallet/`
 2. **Backend telemetry endpoint available** — `POST /api/v1/telemetry/session`
-3. **Session JSONL file** — from `~/.openclaw/agents/main/sessions/`
+3. **Session file** — `.jsonl` (OpenClaw/Claude Code) or `.json` (Hermes) from session directories
 
 ## Usage
 
 ### Upload a session
 
 ```bash
+# OpenClaw / Claude Code (.jsonl)
 python scripts/otel_report.py <session.jsonl>
+
+# Hermes (.json)
+python scripts/otel_report.py <session_YYYYMMDD_HHMMSS_xxxx.json>
 ```
 
 The script auto-detects API URL and key from caw config. Override with env vars:
@@ -125,7 +134,7 @@ Prints the first turn's full JSON payload for inspection.
 python scripts/otel_report.py --watch [sessions_dir]
 ```
 
-Monitors a directory for new `.jsonl` files and auto-uploads.
+Monitors a directory for new session files and auto-uploads.
 
 ### Upload latest session
 
@@ -133,7 +142,7 @@ Monitors a directory for new `.jsonl` files and auto-uploads.
 python scripts/otel_report.py
 ```
 
-Without arguments, uploads the most recent session file from the default path.
+Without arguments, uploads the most recent session file from default paths (`~/.openclaw/.../sessions/` and `~/.hermes/sessions/`).
 
 ## Environment Variables
 
@@ -180,7 +189,7 @@ The script classifies 106 caw CLI subcommands into categories:
 | Dimension | Value | Source |
 |-------------------|-------|--------|
 | Trace Name | `script_{user}@{hostname}_{MMDDHHmm}` | User + hostname + timestamp (UTC+8) |
-| Session ID | OpenClaw session UUID | session.jsonl |
+| Session ID | Session UUID or Hermes session ID | Session file |
 | User ID | Telegram sender_id or "unknown" | First user message |
 | Tags | `[skill_name, "openclaw", provider, "upload:YYYYMMDD"]` | Session metadata + upload date |
 
@@ -191,7 +200,7 @@ The script classifies 106 caw CLI subcommands into categories:
 - **Don't retry after success** — if upload prints `Status: OK`, do not re-run the command
 - **Uploading the current session** is allowed, but note it's still being written — the upload captures a snapshot at that moment
 - **Use `python3`** not `python` — some servers only have `python3`
-- Session files are read-only; never write to `~/.openclaw/`
+- Session files are read-only; never write to `~/.openclaw/` or `~/.hermes/`
 
 ## Security Notes
 
@@ -200,7 +209,7 @@ The script classifies 106 caw CLI subcommands into categories:
 | 告警 | 原因 |
 |------|------|
 | **网络请求** | 脚本通过 `urllib.request` POST 数据到 TelemetryAPI |
-| **文件读取** | 读取 `~/.openclaw/` 下的 session.jsonl 日志文件 |
+| **文件读取** | 读取 `~/.openclaw/`、`~/.hermes/`、`~/.claude/` 下的会话日志文件 |
 | **凭证访问** | 从 `~/.cobo-agentic-wallet/` 读取 caw API key 用于鉴权 |
 | **主机信息** | 通过 `socket.gethostname()` 获取机器名写入 metadata |
 

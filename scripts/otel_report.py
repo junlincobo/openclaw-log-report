@@ -34,6 +34,8 @@ from pathlib import Path
 from typing import Optional
 
 DEFAULT_SESSIONS_DIR = str(Path.home() / ".openclaw" / "agents" / "main" / "sessions")
+HERMES_SESSIONS_DIR = str(Path.home() / ".hermes" / "sessions")
+_SESSION_EXTENSIONS = (".jsonl", ".json")
 
 # Read skill version from SKILL.md (sibling of scripts/)
 _SKILL_VERSION = "unknown"
@@ -201,9 +203,143 @@ def load_caw_config() -> dict[str, str]:
     return result
 
 
-# ── JSONL 解析 ────────────────────────────────────────────────────────────────
+# ── Session 解析 ──────────────────────────────────────────────────────────────
+
+def _is_hermes_json(path: str) -> bool:
+    """Check if a file is a Hermes agent session JSON (not JSONL)."""
+    try:
+        with open(path) as f:
+            first_char = f.read(1).strip()
+            if first_char != "{":
+                return False
+            f.seek(0)
+            data = json.load(f)
+            return isinstance(data, dict) and "messages" in data and "session_id" in data
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return False
+
+
+def _parse_hermes_session(path: str) -> dict:
+    """Parse a Hermes agent session JSON into the internal format."""
+    with open(path) as f:
+        data = json.load(f)
+
+    session_id = data.get("session_id", os.path.basename(path).replace(".json", ""))
+    model = data.get("model", "unknown")
+    started_at = data.get("session_start", "")
+    last_updated = data.get("last_updated", "")
+    platform = data.get("platform", "unknown")
+
+    # Compute time interval for synthetic timestamps
+    try:
+        t_start = datetime.fromisoformat(started_at).timestamp()
+        t_end = datetime.fromisoformat(last_updated).timestamp()
+    except (ValueError, TypeError):
+        t_start = time.time()
+        t_end = t_start
+    raw_msgs = data.get("messages", [])
+    n = max(len(raw_msgs), 1)
+    dt = (t_end - t_start) / n if t_end > t_start else 0.1
+
+    # Convert Hermes messages to internal event format
+    messages: dict[str, dict] = {}
+    order: list[str] = []
+
+    for idx, msg in enumerate(raw_msgs):
+        role = msg.get("role", "")
+        ts_iso = datetime.fromtimestamp(t_start + idx * dt, tz=timezone.utc).isoformat()
+        eid = f"hermes-{idx}"
+
+        if role == "user":
+            ev = {
+                "type": "user",
+                "message": {"role": "user", "content": msg.get("content", "")},
+                "timestamp": ts_iso,
+            }
+        elif role == "assistant":
+            tool_calls = msg.get("tool_calls", [])
+            if tool_calls:
+                # Convert OpenAI tool_calls to tool_use content blocks
+                content_blocks = []
+                for tc in tool_calls:
+                    fn = tc.get("function", {})
+                    args_str = fn.get("arguments", "{}")
+                    try:
+                        args_dict = json.loads(args_str) if isinstance(args_str, str) else args_str
+                    except json.JSONDecodeError:
+                        args_dict = {"raw": args_str}
+                    content_blocks.append({
+                        "type": "tool_use",
+                        "id": tc.get("id", ""),
+                        "name": fn.get("name", ""),
+                        "input": args_dict,
+                    })
+                ev = {
+                    "type": "assistant",
+                    "message": {"role": "assistant", "content": content_blocks},
+                    "timestamp": ts_iso,
+                }
+            else:
+                text = msg.get("content", "")
+                ev = {
+                    "type": "assistant",
+                    "message": {
+                        "role": "assistant",
+                        "content": [{"type": "text", "text": text}] if text else [],
+                    },
+                    "timestamp": ts_iso,
+                }
+        elif role == "tool":
+            tool_call_id = msg.get("tool_call_id", "")
+            raw_content = msg.get("content", "")
+            # Parse tool output if JSON
+            exit_code = None
+            try:
+                parsed = json.loads(raw_content) if isinstance(raw_content, str) else raw_content
+                if isinstance(parsed, dict):
+                    output_text = parsed.get("output", raw_content)
+                    exit_code = parsed.get("exit_code")
+                    if parsed.get("error") and exit_code is None:
+                        exit_code = 1
+                else:
+                    output_text = raw_content
+            except (json.JSONDecodeError, TypeError):
+                output_text = raw_content
+            ev = {
+                "type": "user",
+                "message": {
+                    "role": "toolResult",
+                    "toolCallId": tool_call_id,
+                    "content": [{"type": "text", "text": str(output_text)}],
+                    "details": {"exitCode": exit_code},
+                },
+                "timestamp": ts_iso,
+            }
+        else:
+            # system or other roles — skip
+            continue
+
+        messages[eid] = ev
+        order.append(eid)
+
+    return {
+        "session_id": session_id,
+        "started_at": started_at,
+        "cwd": "",
+        "model": model,
+        "provider": platform,
+        "agent": "hermes",
+        "messages": messages,
+        "order": order,
+    }
+
 
 def parse_session(path: str) -> dict:
+    # Hermes: single JSON file with session_id + messages
+    if path.endswith(".json") and _is_hermes_json(path):
+        return _parse_hermes_session(path)
+
+    # OpenClaw / Claude Code: JSONL format
     messages, order = {}, []
     with open(path) as f:
         for line in f:
@@ -212,6 +348,9 @@ def parse_session(path: str) -> dict:
                 continue
             ev = json.loads(line)
             eid = ev.get("id") or ev.get("uuid") or ev.get("type", "")
+            # queue-operation events share type as eid; make unique
+            if eid == "queue-operation":
+                eid = f"queue-operation-{len(order)}"
             if eid:
                 messages[eid] = ev
                 order.append(eid)
@@ -246,12 +385,15 @@ def parse_session(path: str) -> dict:
         cwd = session_ev.get("cwd", "")
         model_name = snapshot.get("modelId", "unknown")
 
+    agent = "openclaw" if session_ev else "claude-code"
+
     return {
         "session_id": session_id,
         "started_at": started_at,
         "cwd": cwd,
         "model": model_name,
         "provider": snapshot.get("provider", "unknown"),
+        "agent": agent,
         "messages": messages,
         "order": order,
     }
@@ -266,6 +408,12 @@ def _is_message_event(ev: dict) -> bool:
     # Claude Code: type="user" or type="assistant" with message.role
     if ev_type in ("user", "assistant") and "message" in ev:
         return True
+    # Claude Code: queue-operation enqueue = user typed a new message
+    if ev_type == "queue-operation" and ev.get("operation") == "enqueue":
+        content = ev.get("content", "")
+        # Skip task-notifications (background task results, not real user input)
+        if isinstance(content, str) and not content.startswith("<task-notification>"):
+            return True
     return False
 
 
@@ -274,10 +422,41 @@ def extract_message_events(session: dict) -> list[dict]:
             if _is_message_event(session["messages"][i])]
 
 
+def _is_queue_enqueue(ev: dict) -> bool:
+    """Check if event is a Claude Code queue-operation enqueue (real user input)."""
+    return (ev.get("type") == "queue-operation"
+            and ev.get("operation") == "enqueue"
+            and not ev.get("content", "").startswith("<task-notification>"))
+
+
 def build_turns(message_events: list[dict]) -> list[list[dict]]:
-    """每次 role=user（非 toolResult）开启新轮次"""
+    """每次 role=user（非 toolResult）或 queue enqueue 开启新轮次。
+
+    Claude Code uses queue-operation enqueue events for user messages typed
+    while the agent is busy. These should start new turns even though they
+    don't have role=user.
+    """
     turns, current = [], []
     for ev in message_events:
+        # Claude Code queue-operation enqueue → new turn
+        if _is_queue_enqueue(ev):
+            # Check if a matching type=user event follows with same content
+            # (queue enqueue is the UI layer; type=user is the API layer).
+            # We keep the enqueue as a turn marker but don't duplicate it
+            # if the corresponding user event already exists.
+            if current:
+                turns.append(current)
+                current = []
+            # Wrap as a pseudo user message for downstream compatibility
+            content = ev.get("content", "")
+            ev = {
+                **ev,
+                "message": {"role": "user", "content": content},
+                "_from_queue": True,
+            }
+            current.append(ev)
+            continue
+
         role = ev.get("message", {}).get("role")
         # Skip tool_result-only user messages (Claude Code embeds tool_result in user type)
         if role == "user":
@@ -288,6 +467,14 @@ def build_turns(message_events: list[dict]) -> list[list[dict]]:
                     # This is a toolResult message, don't start a new turn
                     if current:
                         current.append(ev)
+                    continue
+            # If this user message matches a queue enqueue already starting
+            # the current turn, skip it to avoid duplicate turn starts.
+            if current and current[0].get("_from_queue"):
+                queue_text = current[0].get("message", {}).get("content", "")
+                user_text = content if isinstance(content, str) else ""
+                if queue_text and user_text and queue_text.strip() == user_text.strip():
+                    current.append(ev)
                     continue
         if role == "user" and current:
             turns.append(current)
@@ -318,12 +505,24 @@ def build_tool_result_index(message_events: list[dict]) -> dict:
                     if isinstance(block, dict) and block.get("type") == "tool_result":
                         tool_use_id = block.get("tool_use_id", "")
                         if tool_use_id:
-                            # Wrap as a compatible format
+                            # Extract exit code from is_error + "Exit code N" in content
+                            is_error = block.get("is_error", False)
+                            exit_code = None
+                            block_content = block.get("content", [])
+                            if is_error:
+                                # Try to parse "Exit code N" from content text
+                                text = block_content if isinstance(block_content, str) else ""
+                                if not text and isinstance(block_content, list):
+                                    text = next((b.get("text", "") for b in block_content
+                                                 if isinstance(b, dict)), "")
+                                m = re.match(r"Exit code (\d+)", text)
+                                exit_code = int(m.group(1)) if m else 1
+
                             index[tool_use_id] = {
                                 "message": {
                                     "role": "toolResult",
-                                    "content": block.get("content", []),
-                                    "details": {},
+                                    "content": block_content,
+                                    "details": {"exitCode": exit_code},
                                 },
                                 "timestamp": ev.get("timestamp"),
                             }
@@ -368,6 +567,8 @@ def _find_caw_token(tokens: list[str]) -> int:
 
 
 def parse_caw_command(command: str) -> Optional[tuple[str, str, str]]:
+    # Strip shell comment lines to avoid matching 'caw' in comments
+    command = re.sub(r"^\s*#[^\n]*$", "", command, flags=re.MULTILINE)
     # Merge shell continuation lines and inline newlines into a single line
     merged = re.sub(r"\\\s*\n\s*", " ", command)
     merged = re.sub(r"\n\s*", " ", merged)
@@ -656,7 +857,7 @@ class SessionUploader:
             "trace_name": trace_display_name,
             "session_id": sid,
             "user_id": user_id,
-            "tags": ["openclaw"],
+            "tags": ["agents"],
             "start_time_unix_nano": start_ns,
             "end_time_unix_nano": last_ns,
             "metadata": {
@@ -665,6 +866,7 @@ class SessionUploader:
                 "provider": prov,
                 "cwd": session.get("cwd", ""),
                 "session_id": sid,
+                "agent": session.get("agent", "unknown"),
                 "telemetry_source": "script",
                 "report_skill_version": _SKILL_VERSION,
                 "uploaded_at": upload_iso,
@@ -724,7 +926,9 @@ class SessionUploader:
                         final_text = b.get("text", "")[:500]
 
         # Turn name with cleaned user input preview (max 10 chars)
-        input_preview = user_text_clean[:10].rstrip() + ".." if len(user_text_clean) > 10 else user_text_clean
+        # Strip leading timestamp patterns like "[Mon 2026-04-13 05:34 UTC]" or "[Fri 2026-04-10 10:44 UTC]"
+        preview_text = re.sub(r"^\[.*?\]\s*", "", user_text_clean).strip()
+        input_preview = preview_text[:10].rstrip() + ".." if len(preview_text) > 10 else preview_text
         turn_name = f'turn:{idx} ("{input_preview}")' if input_preview else f"turn:{idx}"
 
         return {
@@ -826,7 +1030,7 @@ class SessionUploader:
 
         # caw 调用 — handle both OpenClaw (exec) and Claude Code (Bash) tool names
         name_lower = name.lower()
-        if name_lower in ("exec", "bash"):
+        if name_lower in ("exec", "bash", "terminal"):
             cmd = args.get("command", "")
             caw_info = parse_caw_command(cmd)
             if caw_info:
@@ -924,7 +1128,7 @@ class SessionUploader:
                 pass
 
         status = "OK"
-        if not status_ok and category not in ("query", "meta", "dev"):
+        if not status_ok and category not in ("query", "meta"):
             status = "ERROR"
 
         end_ns = result_ts_ns or (ts_ns + int(dur_ms * 1e6) if ts_ns and dur_ms else ts_ns)
@@ -1110,7 +1314,7 @@ def dry_run_session(jsonl_path: str, since_ts: Optional[float] = None,
                             pass
 
                     name_lower = name.lower()
-                    if name_lower in ("exec", "bash"):
+                    if name_lower in ("exec", "bash", "terminal"):
                         caw_info = parse_caw_command(cmd)
                         if caw_info:
                             span_name, category, _ = caw_info
@@ -1204,7 +1408,7 @@ def dump_session(jsonl_path: str) -> None:
         "trace_name": f"script_{time_code}_{rand_suffix}",
         "session_id": sid,
         "user_id": "dump-mode",
-        "tags": ["openclaw"],
+        "tags": ["agents"],
         "metadata": {"model": session["model"], "turns": len(turns), "uploaded_at": upload_iso, "host": f"{getpass.getuser()}@{socket.gethostname()}"},
         "children": turn_children,
     }
@@ -1351,7 +1555,7 @@ if __name__ == "__main__":
             # Sessions are matched if their time range overlaps [since, until].
             scan_dirs: list[str] = []
             for arg in cli_args:
-                if os.path.isfile(arg) and arg.endswith(".jsonl"):
+                if os.path.isfile(arg) and arg.endswith(_SESSION_EXTENSIONS):
                     if _session_overlaps(arg, since_ts, until_ts):
                         paths.append(arg)
                 elif os.path.isdir(arg):
@@ -1361,7 +1565,7 @@ if __name__ == "__main__":
                     for f in expanded:
                         if os.path.isdir(f):
                             scan_dirs.append(f)
-                        elif f.endswith(".jsonl") and not f.endswith(".lock"):
+                        elif f.endswith(_SESSION_EXTENSIONS) and not f.endswith(".lock"):
                             if _session_overlaps(f, since_ts, until_ts):
                                 paths.append(f)
 
@@ -1385,18 +1589,22 @@ if __name__ == "__main__":
                 expanded = glob.glob(arg)
                 if expanded:
                     paths.extend(f for f in expanded
-                                 if f.endswith(".jsonl") and not f.endswith(".lock"))
-                elif arg.endswith(".jsonl"):
+                                 if f.endswith(_SESSION_EXTENSIONS) and not f.endswith(".lock"))
+                elif arg.endswith(_SESSION_EXTENSIONS):
                     paths.append(arg)
 
-            # No args → upload latest session
+            # No args → upload latest session from default dirs
             if not paths:
-                latest = max(
-                    (f for f in glob.glob(os.path.join(DEFAULT_SESSIONS_DIR, "*.jsonl"))
-                     if not f.endswith(".lock")),
-                    key=os.path.getmtime, default=None
-                )
-                if latest:
+                candidates: list[str] = []
+                for sessions_dir in (DEFAULT_SESSIONS_DIR, HERMES_SESSIONS_DIR):
+                    if not os.path.isdir(sessions_dir):
+                        continue
+                    for ext in _SESSION_EXTENSIONS:
+                        for f in glob.glob(os.path.join(sessions_dir, f"*{ext}")):
+                            if not f.endswith(".lock"):
+                                candidates.append(f)
+                if candidates:
+                    latest = max(candidates, key=os.path.getmtime)
                     if _is_active_session(latest):
                         print("[WARN] Session is still active (has .lock file). Uploading snapshot.")
                     paths = [latest]
