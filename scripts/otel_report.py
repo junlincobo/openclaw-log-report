@@ -1487,7 +1487,7 @@ def _get_session_time_range(path: str) -> tuple[Optional[float], Optional[float]
                     ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00")).timestamp()
                 except (ValueError, AttributeError):
                     continue
-                if ev.get("type") == "session" and start_ts is None:
+                if start_ts is None:
                     start_ts = ts
                 end_ts = ts  # last event timestamp
     except Exception:
